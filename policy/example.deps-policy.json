@@ -1,0 +1,22 @@
+{
+  "$comment": "Example per-repo policy. Copy this to <your-repo>/.deps-policy.json and edit.",
+  "cooldownDays": 14,
+  "securityException": true,
+  "allowedBaseFamilies": ["debian", "alpine"],
+  "allowedBaseImages": [
+    "python:3.12-slim-trixie",
+    "node:22-alpine",
+    "nginx:alpine"
+  ],
+  "requirePin": true,
+  "rejectPrerelease": true,
+  "rejectEol": true,
+  "cooldownOverride": {
+    "<package>": {
+      "version": "1.2.3",
+      "reason": "CVE-2026-XXXX fix",
+      "date": "2026-10-21",
+      "reviewBy": "2026-11-21"
+    }
+  }
+}

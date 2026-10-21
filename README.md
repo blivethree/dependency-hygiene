@@ -1,7 +1,7 @@
 # dependency-hygiene
 
 Small, **dependency-free** (stdlib Node 20+ only) tooling that gates two kinds of
-change across the `blivethree/*` repos:
+change across your repos:
 
 - **`scripts/depcheck.mjs`** — dependency freshness + 14-day age gate
   (Python `requirements.txt` + Node `package-lock.json`).
@@ -19,8 +19,8 @@ global `AGENTS.md` so the gates run automatically when you code.
 No npm publish. Just clone once per machine and keep it in sync:
 
 ```bash
-# one time, any machine that has blivethree repos checked out
-git clone git@github.com:blivethree/dependency-hygiene.git ~/.opencode/dependency-hygiene
+# one time, any machine
+git clone https://github.com/<your-org>/dependency-hygiene.git ~/.opencode/dependency-hygiene
 # (Node 20+ required; nothing to install)
 ```
 
@@ -44,15 +44,15 @@ Then create `~/.config/opencode/AGENTS.md` (already in this repo's `references/`
 ## Run
 
 ```bash
-cd /path/to/your/repo            # any blivethree repo
+cd /path/to/your/repo            # any repo
 DHH=~/.opencode/dependency-hygiene
 
 # dependency check (14-day cooldown)
 node $DHH/scripts/depcheck.mjs . --cooldown=14
-node $DHH/scripts/depcheck.mjs . --policy $DHH/policy/<repo>.deps-policy.json --json
+node $DHH/scripts/depcheck.mjs . --policy $DHH/policy/example.deps-policy.json --json
 
 # base-image check
-node $DHH/scripts/imgcheck.mjs . --policy $DHH/policy/<repo>.deps-policy.json --fail
+node $DHH/scripts/imgcheck.mjs . --policy $DHH/policy/example.deps-policy.json --fail
 ```
 
 Exit codes: 0 clean, 1 violation, 2 could not run.
@@ -61,8 +61,8 @@ Exit codes: 0 clean, 1 violation, 2 could not run.
 
 - `references/policy.md` — rules, allowlist, exceptions.
 - `references/runbook.md` — how to act on Snyk findings / fix PRs.
-- `policy/<repo>.deps-policy.json` — per-repo overrides (add a file per repo
-  you want to enforce).
+- `policy/example.deps-policy.json` — template per-repo policy. Copy to your
+  repo and edit the allowed base images / cooldown.
 
 ## OpenCode integration
 
@@ -75,25 +75,22 @@ Exit codes: 0 clean, 1 violation, 2 could not run.
 A per-repo `.github/workflows/deps.yml` clones this repo and runs both
 scripts + `snyk test`. Example:
 
+```yaml
+- uses: actions/checkout@v4
+- uses: actions/setup-node@v4
+  with: { node-version: 24 }
+- run: git clone --depth 1 https://github.com/<your-org>/dependency-hygiene.git $HOME/dependency-hygiene
+- run: node $HOME/dependency-hygiene/scripts/imgcheck.mjs . \
+        --policy $HOME/dependency-hygiene/policy/example.deps-policy.json --fail
+- run: node $HOME/dependency-hygiene/scripts/depcheck.mjs . \
+        --policy $HOME/dependency-hygiene/policy/example.deps-policy.json
+```
+
 > **Note:** This repo is **public** on purpose. GitHub Actions runners cannot
 > `git clone` a private repo without credentials. If you need a private copy,
 > use a PAT or GitHub App token in the workflow instead.
 
 See `TROUBLESHOOTING.md` for the real debugging session that led to this note.
-
-```yaml
-- uses: actions/checkout@v4
-- uses: actions/setup-node@v4
-  with: { node-version: '20' }
-- run: git clone --depth 1 git@github.com:blivethree/dependency-hygiene.git $HOME/dependency-hygiene
-- run: node $HOME/dependency-hygiene/scripts/imgcheck.mjs . \
-        --policy $HOME/dependency-hygiene/policy/<repo>.deps-policy.json --fail
-- run: node $HOME/dependency-hygiene/scripts/depcheck.mjs . \
-        --policy $HOME/dependency-hygiene/policy/<repo>.deps-policy.json
-- uses: snyk/actions/node@master
-  env: { SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} }
-  with: { args: "test --severity-threshold=high" }
-```
 
 ## Phases
 

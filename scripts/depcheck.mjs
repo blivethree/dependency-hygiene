@@ -20,7 +20,7 @@ const SHOW_TRANSITIVE = argv.includes("--transitive"); // report transitive deta
 const SCAN_DIRS = argv.slice(2).filter((a) => !a.startsWith("--") && a !== "--strict" && a !== "--transitive");
 if (!SCAN_DIRS.length) SCAN_DIRS.push(cwd());
 
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", ".cache", ".backups", "retire_app_backup_20260628_160831", ".nvm", ".local", ".npm", ".vscode-server", ".docker"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", "dist", ".cache", ".backups", ".nvm", ".local", ".npm", ".vscode-server", ".docker"]);
 const sleep = (ms) => setTimeout(ms).then(() => {});
 
 const isPrerelease = (v) => /(\.|^)(a|b|rc|alpha|beta|dev)(\.|\d|$)/i.test(v) || v.includes("-");

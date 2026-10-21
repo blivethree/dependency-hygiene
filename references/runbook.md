@@ -1,6 +1,8 @@
 # Dependency & Base-Image Hygiene — Runbook
 
-This is your field guide for acting on dependency/security notices (Snyk findings, Dependabot alerts, Code suggestions, or a `depcheck`/`imgcheck` failure). It pairs with `policy.md` and the `dependency-hygiene` skill.
+This is your field guide for acting on dependency/security notices (Snyk findings,
+Dependabot alerts, Code suggestions, or a `depcheck`/`imgcheck` failure). It pairs
+with `references/policy.md` and the `dependency-hygiene` skill.
 
 ## Two different situations (handle differently)
 
@@ -20,12 +22,12 @@ This is your field guide for acting on dependency/security notices (Snyk finding
 3. Run the checker: `node ~/.agents/skills/dependency-hygiene/scripts/depcheck.mjs` in the repo.
 4. Decide + implement (see sections below).
 5. Verify: `npm run build`, tests, `depcheck`, `snyk test`.
-6. PR against the repo's default branch (**`dev` for `Retirement_App`**). Don't merge Snyk's auto-PR for base images.
+6. PR against the repo's default branch (**`dev` for repos with a dev branch**). Don't merge Snyk's auto-PR for base images.
 
 ### Dependency findings
 
 - **Patch/minor & no major** → `depcheck --fix` (Python) or bump `package.json` (Node). Rebuild + test.
-- **Transitive** → prefer an `overrides` entry (npm) or an explicit pin (Python) rather than a parent major bump. (Your `cloudsizingapp` already does this for `exceljs`.)
+- **Transitive** → prefer an `overrides` entry (npm) or an explicit pin (Python) rather than a parent major bump.
 - **Security fix older than cooldown** → exempt it (security exception is policy-approved).
 - **No fix available / unreachable / dev-only** → record in the repo policy's allowlist with reason + date, **do not leave it red forever.**
 
@@ -42,7 +44,7 @@ This is your field guide for acting on dependency/security notices (Snyk finding
 
 1. `depcheck` will say `OUTDATED → bump to X (cooldown-safe) | latest: Y`.
 2. Bump to the **cooldown-safe target** unless there's a security reason to jump to latest.
-3. Re-run `depcheck` to confirm green, then `npm ci`/`pip install -r requirements.txt` and test.
+3. Re-run `depcheck` until all green, then `npm ci`/`pip install -r requirements.txt` and test.
 
 ## B) Responding to an AI / scanner "fix PR" suggestion
 
@@ -52,16 +54,21 @@ Before merging anything a scanner or AI proposes, run it through `imgcheck` and 
 - Pin-to-cooldown-safe patch/minor bumps, lockfile updates, single-package dependency bumps.
 - Pinning a base image **by digest** after a confirmed fix version (e.g. `python:3.12-slim-trixie@sha256:…`).
 
-### Rejected fix patterns (never merge)
-- `*-rc*`, `*-beta*`, `*-alpha*`, `*-dev`, or `aN`/`bN` base tags. Example from Snyk's history: `python:3.14-rc-alpine3.19` — RC + OS-family swap + EOL Alpine = rejected on all three.
-- **OS-family swaps** in a single edit (Debian↔Alpine). That's glibc→musl — your `apt-get`/`adduser` Dockerfile lines break on Alpine.
-- **EOL target distros** (e.g. `alpine3.19` is EOL).
-- **FROM-line-only edits** where the rest of the Dockerfile isn't adjusted for the new OS (apt/apk, glibc/musl).
-- Floating `:latest` or unpinned `:3.12-slim` (no codename/digest).
+### Rejected fix patterns (never merge these)
+- Any `-rc`/`-beta`/`-alpha`/`-dev`/`aN`/`bN` base tag.
+- An OS-family swap in one edit (Debian↔Alpine) — breaks glibc/musl and
+  package-manager lines (`apt-get` vs `apk`).
+- An EOL distro (e.g. `alpine3.19`).
+- A `FROM:`-only edit where the rest of the Dockerfile is not rewritten for
+  the new OS family.
+- Floating `:latest` or floating family tags (`python:3.12-slim` with no
+  codename/digest).
 
 ## C) Cooldown exception form (for security fixes)
 
-If a package has no cooldown-safe version (the latest fix is < 14 days old), you may still adopt it for a **security** reason. Document it in the PR and in `deps-policy.json` under `cooldownOverride`:
+If a package has no cooldown-safe version (the latest fix is < 14 days old), you
+may still adopt it for a **security** reason. Document it in the repo's
+`.deps-policy.json` under `cooldownOverride`:
 
 ```json
 "cooldownOverride": {
@@ -79,6 +86,7 @@ Review overrides quarterly; remove once the version ages out of cooldown.
 
 ## Escalation / decisions
 
-Unclear whether a finding is stale or real → rebuild `--pull` and re-scan; if still flagged, it's real.
+Unclear whether a finding is stale or real → rebuild `--pull` and re-scan; if still
+flagged, it's real.
 Unsure about an OS-family change → reject by default; propose deliberately.
 Policy conflicts with a finding → update the policy repo (this repo) and re-run.

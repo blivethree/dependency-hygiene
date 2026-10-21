@@ -26,10 +26,9 @@ You are a careful gatekeeper for dependencies and base images. Apply this
 
 ## Workflow
 
-1. **Locate the policy.** Read `references/policy.md` for this repo's
-   allowlist and cooldown (default 14 days; security fixes excepted). Run
-   `imgcheck.mjs` against the repo to see the current `FROM` lines and
-   whether each is allowed/pinned.
+1. **Locate the policy.** Read `references/policy.md` for the rules and cooldown
+   (default 14 days; security fixes excepted). Run `imgcheck.mjs` against the
+   repo to see the current `FROM` lines and whether each is allowed/pinned.
 
 2. **For a dependency adoption/upgrade:**
    - Run `node ~/.agents/skills/dependency-hygiene/scripts/depcheck.mjs` from
@@ -37,7 +36,7 @@ You are a careful gatekeeper for dependencies and base images. Apply this
    - Read the status column: `OK`, `OUTDATED`, `TOO_NEW`, `UNPINNED`,
      `PRERELEASE`, `UNRESOLVING`.
    - **Reject** `TOO_NEW` (< 14 days) and `PRERELEASE` unless there is a
-     documented security override in `deps-policy.json`.
+     documented security override in `.deps-policy.json`.
    - **Bump** `OUTDATED` to the cooldown-safe target the tool suggests.
 
 3. **For a base-image change / Snyk fix PR:**
@@ -59,8 +58,8 @@ You are a careful gatekeeper for dependencies and base images. Apply this
 5. **For a Node app:**
    - Ranges in `package.json` are fine **only if** `package-lock.json` is
      committed. `depcheck` audits the lockfile.
-   - For a transitive CVE, prefer an `overrides` block (see
-     `cloudsizingapp` precedent) over a parent major bump.
+   - For a transitive CVE, prefer an `overrides` block (npm) or an explicit
+     pin (Python) over a parent major bump.
 
 ## Rejected fix patterns (never merge these)
 
@@ -75,7 +74,7 @@ You are a careful gatekeeper for dependencies and base images. Apply this
 
 ## Security override (exception to the cooldown)
 
-Document in `deps-policy.json`:
+Document in `.deps-policy.json`:
 
 ```json
 "cooldownOverride": {
