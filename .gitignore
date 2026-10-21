@@ -1,0 +1,15 @@
+# Tooling
+node_modules/
+package-lock.json
+*.tgz
+
+# caches / state
+.depcheck-cache.json
+.depcheck-cache*.json
+*.log
+
+# editor / os
+.DS_Store
+*.swp
+.idea/
+*.code-workspace
