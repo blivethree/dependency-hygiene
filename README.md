@@ -75,6 +75,12 @@ Exit codes: 0 clean, 1 violation, 2 could not run.
 A per-repo `.github/workflows/deps.yml` clones this repo and runs both
 scripts + `snyk test`. Example:
 
+> **Note:** This repo is **public** on purpose. GitHub Actions runners cannot
+> `git clone` a private repo without credentials. If you need a private copy,
+> use a PAT or GitHub App token in the workflow instead.
+
+See `TROUBLESHOOTING.md` for the real debugging session that led to this note.
+
 ```yaml
 - uses: actions/checkout@v4
 - uses: actions/setup-node@v4
