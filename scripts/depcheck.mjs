@@ -2,7 +2,10 @@
 // depcheck.mjs — dependency freshness + 14-day age gate.
 // Python requirements.txt + Node package-lock.json. Stdlib Node 20+ only (no installs).
 //
-//   node scripts/depcheck.mjs [paths...] [--cooldown=14] [--json]
+//   node scripts/depcheck.mjs [paths...] [--cooldown=14] [--json] [--strict] [--fix]
+//   - Direct deps block the gate (Python pins are all direct).
+//   - Transitive deps are advisory by default (yellow) -> use --strict to escalate.
+//   - TOO_NEW is a warning (exit 0) unless it would block adoption of a fresh lib.
 //   exit 0 = clean, 1 = violations, 2 = could not run.
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -12,7 +15,9 @@ import { setTimeout } from "node:timers/promises";
 const COOLDOWN_DAYS = Number(argv.find((a) => a.startsWith("--cooldown="))?.split("=")[1]) || 14;
 const JSON_OUT = argv.includes("--json");
 const FIX = argv.includes("--fix");
-const SCAN_DIRS = argv.slice(2).filter((a) => !a.startsWith("--"));
+const STRICT = argv.includes("--strict");
+const SHOW_TRANSITIVE = argv.includes("--transitive"); // report transitive detail
+const SCAN_DIRS = argv.slice(2).filter((a) => !a.startsWith("--") && a !== "--strict" && a !== "--transitive");
 if (!SCAN_DIRS.length) SCAN_DIRS.push(cwd());
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", ".cache", ".backups", "retire_app_backup_20260628_160831", ".nvm", ".local", ".npm", ".vscode-server", ".docker"]);
@@ -128,50 +133,86 @@ for (const f of pyFiles) {
   }
 }
 for (const f of lockFiles) {
-  const lock = JSON.parse(await readFile(f, "utf8"));
-  // resolve sibling package.json for dev flag
+  const pkgText = await readFile(f, "utf8");
+  // resolve sibling package.json for direct/dev flag
   const pkgPath = join(f, "..", "package.json");
   let pkg = {};
   try { pkg = JSON.parse(await readFile(pkgPath, "utf8")); } catch {}
-  const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
-  const pkgText = await readFile(f, "utf8");
+  const directSet = new Set(Object.keys({ ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }));
   for (const d of parseLock(pkgText)) {
-    const isDirect = allDeps[d.name] !== undefined;
+    const isDirect = directSet.has(d.name);
     const reg = await npmReleases(d.name);
     const r = classify(d, reg);
-    rows.push({ file: relative(cwd(), f), ecosystem: d.dev ? "npm(dev)" : "npm", name: d.name, current: d.current || "—", latest: reg?.latest || "—", direct: isDirect ? "direct" : "transitive", ...r });
+    rows.push({
+      file: relative(cwd(), f), ecosystem: d.dev ? "npm(dev)" : "npm", name: d.name,
+      current: d.current || "—", latest: reg?.latest || "—",
+      direct: isDirect ? "direct" : "transitive", ...r,
+    });
   }
 }
 
-if (JSON_OUT) { stdout.write(JSON.stringify(rows, null, 2) + "\n"); exit(rows.some((r) => ["OUTDATED", "PRERELEASE", "UNPINNED", "UNRESOLVING"].includes(r.status)) ? 1 : 0); }
+if (JSON_OUT) {
+  const out = rows;
+  const failing = STRICT
+    ? out.filter((r) => ["OUTDATED", "PRERELEASE", "UNPINNED", "UNRESOLVING"].includes(r.status))
+    : out.filter((r) => ["OUTDATED", "PRERELEASE", "UNPINNED", "UNRESOLVING"].includes(r.status) && r.direct === "direct");
+  stdout.write(JSON.stringify({ cooldownDays: COOLDOWN_DAYS, strict: STRICT, rows: out }, null, 2) + "\n");
+  exit(failing.length ? 1 : 0);
+}
 
 if (!rows.length) { console.log("depcheck: no requirements.txt or package-lock.json found."); exit(0); }
 
-console.log(`\ndepcheck  (cooldown=${COOLDOWN_DAYS}d, scanned ${new Set(rows.map((r) => r.file)).size} file(s))\n`);
-const headers = ["ECO", "PACKAGE", "CURRENT", "STATUS", "LATEST", "SCOPE", "NOTE"];
-const w = headers.map((h) => Math.max(h.length, ...rows.map((r) => String(r[h.toLowerCase()] || r[h.replace(/([A-Z])/g, "_$1").toLowerCase()] || "").length)));
-const fmt = (r) => headers.map((h, i) => String(r[h.toLowerCase()] || r[h.replace(/([A-Z])/g, "_$1").toLowerCase()] || "").padEnd(w[i])).join("  ");
-stdout.write(headers.join("  ".repeat(1)) + "\n");
+console.log(`\ndepcheck  (cooldown=${COOLDOWN_DAYS}d, scanned ${new Set(rows.map((r) => r.file)).size} file(s), ${STRICT ? "strict (transitive fails)" : "direct-only (transitive=advisory)"})\n`);
+const fields = [
+  { key: "ecosystem" },
+  { key: "name" },
+  { key: "current" },
+  { key: "status" },
+  { key: "latest" },
+  { key: "direct" },
+  { key: "note" },
+];
+const w = [];
+for (let i = 0; i < fields.length; i++) {
+  const label = ["ECO", "PACKAGE", "CURRENT", "STATUS", "LATEST", "SCOPE", "NOTE"][i];
+  const vals = rows.map((r) => String(r[fields[i].key] || r.current === "—" ? r.current : "").toString());
+  const max = Math.max(label.length, ...rows.map((r) => String(r[fields[i].key] || (fields[i].key === "note" ? "" : "—")).length));
+  w.push(max);
+}
+stdout.write(["ECO", "PACKAGE", "CURRENT", "STATUS", "LATEST", "SCOPE", "NOTE"].map((h, i) => h.padEnd(w[i])).join("  ") + "\n");
+
+// Gating policy:
+//  - Python requirements.txt: every pin is treated as a direct dep -> any violation blocks.
+//  - Node lockfile: only DIRECT deps (present in package.json) block the gate.
+//    Transitive dev-tooling churn (rollup/rolldown/vite betas, etc.) is advisory
+//    (yellow) and does NOT fail unless --strict.
+const isBlocking = (r) => {
+  if (!["OUTDATED", "PRERELEASE", "UNPINNED", "UNRESOLVING"].includes(r.status)) return false;
+  if (r.ecosystem === "pypi") return true;
+  if (STRICT) return true;
+  return r.direct === "direct";
+};
+
 for (const r of rows) {
-  const line = [
-    r.ecosystem.padEnd(w[0]),
-    r.name.padEnd(w[1]),
-    r.current.toString().padEnd(w[2]),
-    r.status.padEnd(w[3]),
-    r.latest.padEnd(w[4]),
-    (r.direct || "—").padEnd(w[5]),
-    r.note,
-  ].join("  ");
-  // color-code
+  const scope = r.direct || (r.ecosystem === "pypi" ? "direct" : "transitive");
+  const cells = [r.ecosystem, r.name, r.current?.toString() || "—", r.status, r.latest || "—", scope, r.note || ""];
+  const line = cells.map((c, i) => c.padEnd(w[i])).join("  ");
   let color = ""; const reset = "\x1b[0m";
+  const scopeAdvisory = scope === "transitive" && !isBlocking(r);
   if (r.status === "OK") color = "\x1b[32m";
-  else if (r.status === "TOO_NEW") color = "\x1b[33m";
+  else if (r.status === "TOO_NEW" || scopeAdvisory) color = "\x1b[33m";
   else color = "\x1b[31m";
   stdout.write(color + line + reset + "\n");
 }
 const summary = {};
 for (const r of rows) summary[r.status] = (summary[r.status] || 0) + 1;
-stdout.write("\nSummary: " + Object.entries(summary).map(([s, c]) => `${c} ${s}`).join(", ") + "\n");
+stdout.write("\nSummary: " + Object.entries(summary).map(([s, c]) => `${c} ${s}`).join(", "));
 
-const fail = rows.filter((r) => ["OUTDATED", "PRERELEASE", "UNPINNED", "UNRESOLVING"].includes(r.status));
+const advisory = rows.filter(
+  (r) => !isBlocking(r) && !["OK", "TOO_NEW"].includes(r.status)
+);
+if (advisory.length) stdout.write(`  | ${advisory.length} advisory (transitive/non-direct; --strict to escalate)`);
+stdout.write("\n");
+
+const fail = rows.filter(isBlocking);
 exit(fail.length ? 1 : 0);
