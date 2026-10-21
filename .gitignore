@@ -1,14 +1,14 @@
-# Tooling
+# Tooling artifacts
 node_modules/
 package-lock.json
 *.tgz
 
-# caches / state
-.depcheck-cache.json
-.depcheck-cache*.json
+# Script caches / state
+depcheck-cache.json
+depcheck-cache.*.json
 *.log
 
-# editor / os
+# Editor / OS
 .DS_Store
 *.swp
 .idea/

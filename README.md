@@ -70,7 +70,25 @@ Exit codes: 0 clean, 1 violation, 2 could not run.
   compat path `~/.claude/skills/`).
 - `references/runbook.md` is loaded by the skill.
 
-## CI usage (see Phase 3)
+## CI usage
 
 A per-repo `.github/workflows/deps.yml` clones this repo and runs both
-scripts + `snyk test`. (Not added yet — coming next.)
+scripts + `snyk test`. Example:
+
+```yaml
+- uses: actions/checkout@v4
+- uses: actions/setup-node@v4
+  with: { node-version: '20' }
+- run: git clone --depth 1 git@github.com:blivethree/dependency-hygiene.git $HOME/dependency-hygiene
+- run: node $HOME/dependency-hygiene/scripts/imgcheck.mjs . \
+        --policy $HOME/dependency-hygiene/policy/<repo>.deps-policy.json --fail
+- run: node $HOME/dependency-hygiene/scripts/depcheck.mjs . \
+        --policy $HOME/dependency-hygiene/policy/<repo>.deps-policy.json
+- uses: snyk/actions/node@master
+  env: { SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} }
+  with: { args: "test --severity-threshold=high" }
+```
+
+## Phases
+
+This repo was built in phases. See `PHASES.md` for the plan and current status.
