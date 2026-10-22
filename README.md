@@ -19,12 +19,14 @@ automatically when you code.
 
 ## Install (use on any PC)
 
-No npm publish. Just clone once per machine and keep it in sync:
+No npm publish. Clone a release tag (or a full commit SHA) so the code you run
+is identifiable later:
 
 ```bash
-# one time, any machine
-git clone https://github.com/<your-org>/dependency-hygiene.git ~/.opencode/dependency-hygiene
+# one time, any machine — pin a tag or full commit SHA
+git clone --branch v0.4.0 --depth 1 https://github.com/<your-org>/dependency-hygiene.git ~/.opencode/dependency-hygiene
 # (Node 20+ required; nothing to install)
+# update deliberately: git fetch --tags && git checkout vX.Y.Z
 ```
 
 To use the **OpenCode skill** on this machine:
@@ -165,6 +167,7 @@ name-gated).
 
 ```bash
 npm test        # stdlib node --test; no installs, no network
+# the same suite runs on every PR in .github/workflows/ci.yml
 ```
 
 Inventory parsing, classification, the denylist, and end-to-end CLI behaviour are
@@ -184,17 +187,27 @@ summary, frozen deploy job) is `examples/deps.yml`; ownership for
 `approved.json` is `examples/CODEOWNERS`.
 
 ```yaml
-- uses: actions/checkout@v4
+- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
   with: { fetch-depth: 0 }   # scope=new needs the baseline
-- uses: actions/setup-node@v4
+- uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
   with: { node-version: 24 }
-- run: git clone --depth 1 https://github.com/<your-org>/dependency-hygiene.git $HOME/dependency-hygiene
+- run: git clone --branch v0.4.0 --depth 1 https://github.com/<your-org>/dependency-hygiene.git $HOME/dependency-hygiene
 - run: node $HOME/dependency-hygiene/scripts/imgcheck.mjs . \
         --policy $HOME/dependency-hygiene/policy/example.deps-policy.json --fail
 - run: node $HOME/dependency-hygiene/scripts/depcheck.mjs . \
         --approved=approved.json
 ```
 
+> **Pin the tool; don't track `main`.** Bump `v0.4.0` deliberately — Dependabot
+> updates the action SHAs but not this shell pin. Verify the release checksums
+> before running the scripts:
+>
+> ```bash
+> curl -fsSLo /tmp/dh-SHA256SUMS \
+>   https://github.com/<your-org>/dependency-hygiene/releases/download/v0.4.0/SHA256SUMS
+> (cd "$HOME/dependency-hygiene" && sha256sum -c /tmp/dh-SHA256SUMS)
+> ```
+>
 > **Note:** This repo is **public** on purpose. GitHub Actions runners cannot
 > `git clone` a private repo without credentials. If you need a private copy,
 > use a PAT or GitHub App token in the workflow instead.
@@ -204,6 +217,11 @@ summary, frozen deploy job) is `examples/deps.yml`; ownership for
 > a build; it cannot stop a merge or a deploy on its own.
 
 See `TROUBLESHOOTING.md` for the real debugging session that led to this note.
+
+## Security
+
+See `SECURITY.md` for private vulnerability reporting, supported versions, and
+the consumer pinning/verification requirements.
 
 ## Phases
 
