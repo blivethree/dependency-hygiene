@@ -6,6 +6,7 @@
 //   node scripts/depcheck.mjs [paths...] [--cooldown=14] [--json] [--strict] [--fix]
 //        [--policy=path] [--compromised=path] [--baseline=rev] [--no-baseline]
 //        [--approved=path] [--seed-approved] [--verify-integrity]
+//        [--approval-scope=new|all] [--print-approval-request] [--frozen]
 //
 //   - COMPROMISED / WITHDRAWN / YANKED always block: any ecosystem, any scope.
 //   - UNAGED_NEW_DEP blocks a *newly introduced* pin younger than the cooldown
@@ -18,6 +19,13 @@
 //   - With --approved (or .deps-policy.json → approved) a direct dep that is not
 //     on the list is unapproved -> blocking. Transitive deps are not name-gated:
 //     a 500-entry allowlist rots into rubber-stamping.
+//   - --approval-scope=new (default) gates only direct dep *names* that are new
+//     relative to the git baseline, so a PR adding a library needs sign-off while
+//     the pre-existing tree keeps building. --approval-scope=all is the audit /
+//     deploy view. An entry with no approvedBy/date is a *request*, not an
+//     approval: it stays blocking until a reviewer fills the record.
+//   - --frozen is the deploy gate: requires an approved list, forces scope=all +
+//     --strict, and exits 2 rather than pass on nothing.
 //   - One registry fetch per package name (cached), so big lockfiles stay cheap.
 //   exit 0 = clean, 1 = violations, 2 = could not run.
 import { execFile } from "node:child_process";
@@ -35,7 +43,7 @@ const TOOL_ROOT = resolve(SCRIPT_DIR, "..");
 
 // ── args ──
 // Flags that take a value; the value must not be mistaken for a scan directory.
-const VALUE_FLAGS = new Set(["policy", "cooldown", "compromised", "baseline", "approved"]);
+const VALUE_FLAGS = new Set(["policy", "cooldown", "compromised", "baseline", "approved", "approval-scope"]);
 const rawArgs = argv.slice(2);
 const flagValue = (name) => {
   const eq = rawArgs.find((a) => a.startsWith(`--${name}=`));
@@ -55,11 +63,25 @@ if (!SCAN_DIRS.length) SCAN_DIRS.push(cwd());
 
 const JSON_OUT = hasFlag("json");
 const FIX = hasFlag("fix");
-const STRICT = hasFlag("strict");
 const NO_BASELINE = hasFlag("no-baseline");
 const SEED_APPROVED = hasFlag("seed-approved");
 const VERIFY_INTEGRITY = hasFlag("verify-integrity");
-const BASELINE_REV = flagValue("baseline") || "HEAD";
+const PRINT_APPROVAL_REQUEST = hasFlag("print-approval-request");
+const FROZEN = hasFlag("frozen");
+// --frozen is a deploy gate: no advisories, no grandfathering, no passing on an
+// empty scan. It implies strictness rather than asking the caller to remember.
+const STRICT = hasFlag("strict") || FROZEN;
+const APPROVAL_SCOPE_FLAG = flagValue("approval-scope");
+if (APPROVAL_SCOPE_FLAG && !["new", "all"].includes(APPROVAL_SCOPE_FLAG)) {
+  stderr.write(`depcheck: --approval-scope must be "new" or "all" (got "${APPROVAL_SCOPE_FLAG}")\n`);
+  exit(2);
+}
+const APPROVAL_SCOPE = FROZEN ? "all" : (APPROVAL_SCOPE_FLAG || "new");
+// On a PR checkout, HEAD is the merge commit and already contains the change, so
+// comparing to HEAD would find nothing new. GitHub exposes the target branch as
+// GITHUB_BASE_REF; use origin/<base> when it is available. Locally (and on push)
+// HEAD is still the right comparison point for uncommitted work.
+const BASELINE_REV = flagValue("baseline") || (env.GITHUB_BASE_REF ? `origin/${env.GITHUB_BASE_REF}` : "HEAD");
 
 const PYPI_INDEX = (env.DEPCHECK_PYPI_INDEX || "https://pypi.org/pypi").replace(/\/+$/, "");
 const NPM_REGISTRY = (env.DEPCHECK_NPM_REGISTRY || "https://registry.npmjs.org").replace(/\/+$/, "");
@@ -119,19 +141,53 @@ const APPROVALS = [
   ...(Array.isArray(POLICY?.approved) ? POLICY.approved : []),
 ].filter((e) => e && e.name).map((e) => ({ ...e, ecosystem: normEco(e.ecosystem || "pypi") }));
 const APPROVAL_ON = Boolean(APPROVED_PATH) || Array.isArray(POLICY?.approved);
+if (FROZEN && !APPROVAL_ON) {
+  stderr.write("depcheck: --frozen needs an approved list (--approved=<path> or .deps-policy.json → approved); refusing to gate a deploy on nothing\n");
+  exit(2);
+}
 
-// undefined = gate off; true/false = decision. Name-level unless the entry pins
-// a version/versions, in which case a bump needs a fresh decision.
-function approvalFor(dep) {
+// An entry only counts as an approval once it records who signed off and when.
+// Blank placeholders are a *request*: that is what a developer commits, and the
+// gate stays red until security fills the record. --strict/--frozen also require
+// the rationale and a review date, because that is the evidence an auditor asks for.
+const REQUIRED_APPROVAL_FIELDS = ["approvedBy", "date"];
+const REVIEW_APPROVAL_FIELDS = ["rationale", "reviewBy"];
+
+function approvalNameHit(dep) {
+  const eco = normEco(dep.ecosystem), name = normName(dep.name);
+  return APPROVALS.find((e) => (!e.ecosystem || e.ecosystem === eco) && normName(e.name) === name);
+}
+
+function findApproval(dep) {
+  const v = dep.current ? String(dep.current) : null;
+  const hit = approvalNameHit(dep);
+  if (!hit) return undefined;
+  const pinned = hit.version ? [String(hit.version)] : (hit.versions || []).map(String);
+  return pinned.length === 0 || (v !== null && pinned.includes(v)) ? hit : undefined;
+}
+
+// undefined = gate off / not required. Otherwise the row carries the decision
+// plus a human-readable reason, so the JSON is enough to drive a PR comment.
+function approvalRecordFor(dep) {
   if (!APPROVAL_ON) return undefined;
-  const eco = normEco(dep.ecosystem), name = normName(dep.name), v = dep.current ? String(dep.current) : null;
-  const hit = APPROVALS.find((e) => {
-    if (e.ecosystem && e.ecosystem !== eco) return false;
-    if (normName(e.name) !== name) return false;
-    const pinned = e.version ? [String(e.version)] : (e.versions || []).map(String);
-    return pinned.length === 0 || (v !== null && pinned.includes(v));
-  });
-  return Boolean(hit);
+  const entry = findApproval(dep);
+  if (!entry) {
+    const named = approvalNameHit(dep);
+    if (named) {
+      const pinned = named.version ? [String(named.version)] : (named.versions || []).map(String);
+      return { approved: false, issue: `approved only for ${pinned.join(", ") || "a different pin"} — ${dep.current || "this requirement"} needs a fresh decision` };
+    }
+    return { approved: false, issue: "not on the approved list" };
+  }
+  const missing = REQUIRED_APPROVAL_FIELDS.filter((f) => !String(entry[f] ?? "").trim());
+  if (missing.length) {
+    return { approved: false, issue: `approval record incomplete (needs ${missing.join(" + ")})`, entry, missing };
+  }
+  const weak = REVIEW_APPROVAL_FIELDS.filter((f) => !String(entry[f] ?? "").trim());
+  if (STRICT && weak.length) {
+    return { approved: false, issue: `approval record incomplete under --strict (needs ${weak.join(" + ")})`, entry, missing: weak };
+  }
+  return { approved: true, entry, weak };
 }
 
 export function compromisedHit(dep) {
@@ -164,11 +220,24 @@ function revisitAfter(rel) {
   return new Date(t).toISOString().slice(0, 10);
 }
 
+// Licences arrive as SPDX ids, prose, or "UNKNOWN". Keep one short line; the
+// reviewer needs a signal, not a 4KB licence dump.
+function tidyLicense(l) {
+  const t = String(l || "").split("\n")[0].trim();
+  if (!t || t.toUpperCase() === "UNKNOWN") return null;
+  return t.length > 60 ? `${t.slice(0, 57)}…` : t;
+}
+
 async function pypiReleases(name) {
   const d = await getJSON(`${PYPI_INDEX}/${encodeURIComponent(name)}/json`);
   if (!d) return null;
   const rels = [];
+  const times = [];
   for (const [v, files] of Object.entries(d.releases || {})) {
+    for (const f of files || []) {
+      const t = new Date(f.upload_time).getTime();
+      if (t) times.push(t);
+    }
     if (!files || !files.length || isPrerelease(v)) continue;
     const t = files.map((f) => new Date(f.upload_time).getTime()).filter(Boolean);
     if (!t.length) continue;
@@ -180,7 +249,13 @@ async function pypiReleases(name) {
     });
   }
   rels.sort((a, b) => new Date(b.lastUpload) - new Date(a.lastUpload));
-  return { latest: d.info?.version || rels[0]?.v || null, rels };
+  return {
+    latest: d.info?.version || rels[0]?.v || null,
+    rels,
+    firstPublished: times.length ? new Date(Math.min(...times)).toISOString() : null,
+    releaseCount: rels.length,
+    license: tidyLicense(d.info?.license || d.info?.license_expression),
+  };
 }
 
 async function npmReleases(name) {
@@ -190,7 +265,15 @@ async function npmReleases(name) {
   const time = d.time || {};
   for (const [v, t] of Object.entries(time)) { if (["created", "modified"].includes(v) || isPrerelease(v)) continue; rels.push({ v, lastUpload: t }); }
   rels.sort((a, b) => new Date(b.lastUpload) - new Date(a.lastUpload));
-  return { latest: d["dist-tags"]?.latest || rels[0]?.v || null, rels };
+  const latest = d["dist-tags"]?.latest || rels[0]?.v || null;
+  const times = Object.values(time).map((t) => new Date(t).getTime()).filter(Boolean);
+  return {
+    latest,
+    rels,
+    firstPublished: time.created || (times.length ? new Date(Math.min(...times)).toISOString() : null),
+    releaseCount: rels.length,
+    license: tidyLicense(d.license || (latest ? d.versions?.[latest]?.license : null)),
+  };
 }
 
 const REGISTRY_CACHE = new Map();
@@ -550,6 +633,28 @@ async function scan() {
     for (const d of deps) directNames.add(`${normEco(d.ecosystem)}:${normName(d.name)}`);
   }
 
+  // scope=new: a direct dep needs approval only if its *name* is new relative to
+  // the direct manifests at the baseline revision. Deriving the set from
+  // declaration files (not lockfiles) means a package that was already present
+  // transitively does not count as "already approved" when it is first declared.
+  // No usable baseline is not proof of legacy, so it fails closed (everything is
+  // treated as new) rather than silently grandfathering a whole tree.
+  let baselineKeys = null;
+  if (APPROVAL_ON && APPROVAL_SCOPE === "new" && !NO_BASELINE) {
+    const keys = new Set();
+    let available = false;
+    for (const f of manifests) {
+      const base = f.split("/").pop();
+      if (!DIRECT_MANIFESTS.has(base)) continue;
+      const map = await baselineFor(f);
+      if (!map) continue;
+      available = true;
+      const eco = base === "package.json" ? "npm" : "pypi";
+      for (const n of map.keys()) keys.add(`${eco}:${normName(n)}`);
+    }
+    baselineKeys = available ? keys : null;
+  }
+
   const rows = [];
   for (const [f, deps] of parsed) {
     const base = f.split("/").pop();
@@ -559,9 +664,20 @@ async function scan() {
     for (const d of deps) {
       const reg = await registryFor(d);
       const direct = isLock ? (directNames.has(`${normEco(d.ecosystem)}:${normName(d.name)}`) ? "direct" : "transitive") : "direct";
+      const eco = normEco(d.ecosystem);
+      const nameKey = `${eco}:${normName(d.name)}`;
+      const legacy = baselineKeys !== null && baselineKeys.has(nameKey);
+      // A version-pinned entry is an explicit "come back on a bump", so a
+      // mismatch stays in scope even once the name is legacy; otherwise pinning
+      // would silently stop working after the first merge.
+      const named = approvalNameHit(d);
+      const pinnedMismatch = Boolean(named && (named.version || (named.versions || []).length) && !findApproval(d));
+      const required = direct === "direct" && APPROVAL_ON && (
+        APPROVAL_SCOPE === "all" || baselineKeys === null || !legacy || pinnedMismatch
+      );
+      const approval = required ? approvalRecordFor(d) : undefined;
       let finalRow = await applyAdoptionRule(d, f, classify(d, reg));
       if (integrity) finalRow = applyIntegrity(finalRow, d);
-      const eco = normEco(d.ecosystem);
       rows.push({
         file: relative(cwd(), f),
         ecosystem: d.dev ? `${eco}(dev)` : eco,
@@ -570,8 +686,16 @@ async function scan() {
         current: d.current || "—",
         latest: reg?.latest || "—",
         direct,
-        approved: approvalFor(d),
         ...finalRow,
+        approved: approval?.approved,
+        approvalIssue: approval && !approval.approved ? approval.issue : undefined,
+        approvalMissing: approval?.missing?.length ? approval.missing : undefined,
+        approvalWeak: approval?.weak?.length ? approval.weak : undefined,
+        approvalBasis: !APPROVAL_ON || direct !== "direct" ? undefined
+          : APPROVAL_SCOPE === "all" ? "all"
+          : baselineKeys === null ? "no-baseline"
+          : pinnedMismatch && legacy ? "pinned"
+          : required ? "new" : "legacy",
       });
     }
   }
@@ -591,7 +715,9 @@ async function scan() {
 }
 
 // --seed-approved: bootstrap the list from the current direct deps, so the gate
-// does not start life as a wall of red (which gets rubber-stamped).
+// does not start life as a wall of red (which gets rubber-stamped). Seeded
+// entries are marked `grandfathered` so an auditor can find the ones that were
+// never actually reviewed.
 async function seedApprovals(rows) {
   if (!APPROVED_PATH) {
     stderr.write("depcheck: --seed-approved needs --approved=<path>\n");
@@ -604,19 +730,52 @@ async function seedApprovals(rows) {
     .map((r) => ({
       ecosystem: normEco(r.ecosystem),
       name: r.name,
-      rationale: "",
+      grandfathered: true,
+      rationale: "Grandfathered when the approval gate was adopted; security must review and replace this text.",
       approvedBy: env.USER || "unset",
       date: today,
       reviewBy,
     }));
   const body = {
-    $comment: "Approved direct dependencies. Adding or replacing a direct dep needs a human decision here. Name-level by default; add \"version\" (or \"versions\") to require a fresh approval on bump.",
+    $comment: "Approved DIRECT dependencies. A scope=new run only gates names that are new relative to the git baseline. Blank approvedBy/date is a request, not an approval: it stays blocking. Name-level by default; add \"version\" (or \"versions\") to require a fresh approval on bump.",
     updated: today,
     entries,
   };
   await writeFile(APPROVED_PATH, JSON.stringify(body, null, 2) + "\n");
-  stderr.write(`seed-approved: wrote ${entries.length} entries to ${APPROVED_PATH} — fill in rationale before committing\n`);
+  stderr.write(`seed-approved: wrote ${entries.length} grandfathered entries to ${APPROVED_PATH} — have security replace each rationale/reviewBy\n`);
   exit(0);
+}
+
+// Paste-ready request for the unapproved direct deps. The registry evidence sits
+// in the same record the reviewer signs, so the audit trail says *what was
+// checked*, not just who clicked approve. Blank approvedBy/date keeps the gate
+// red until a reviewer fills them in.
+async function buildApprovalRequest(rows) {
+  const pending = rows.filter((r) => r.direct === "direct" && r.approved === false);
+  const entries = [];
+  for (const r of pending) {
+    const cached = REGISTRY_CACHE.get(`${normEco(r.ecosystem)}:${normName(r.name)}`);
+    const registry = cached ? await cached : null;
+    const rel = registry?.rels.find((x) => x.v === String(r.current)) || null;
+    entries.push({
+      ecosystem: normEco(r.ecosystem),
+      name: r.name,
+      rationale: "",
+      approvedBy: "",
+      date: "",
+      reviewBy: "",
+      checks: {
+        requestedVersion: r.current === "—" ? null : r.current,
+        status: r.status,
+        versionAgeDays: rel ? Number(ageDays(rel.lastUpload).toFixed(1)) : null,
+        firstPublished: registry?.firstPublished || null,
+        releases: registry?.releaseCount ?? null,
+        license: registry?.license || null,
+        knownBad: BLOCKING_ALWAYS.has(r.status),
+      },
+    });
+  }
+  return entries;
 }
 
 async function main() {
@@ -638,7 +797,34 @@ async function main() {
   const directKeys = new Set(out.filter((r) => r.direct === "direct").map((r) => `${normEco(r.ecosystem)}:${normName(r.name)}`));
   const staleApprovals = APPROVAL_ON ? APPROVALS.filter((e) => !directKeys.has(`${e.ecosystem}:${normName(e.name)}`)) : [];
   const overdueApprovals = APPROVAL_ON ? APPROVALS.filter((e) => e.reviewBy && e.reviewBy < today) : [];
+  const weakApprovals = APPROVAL_ON
+    ? APPROVALS.filter((e) => REVIEW_APPROVAL_FIELDS.some((f) => !String(e[f] ?? "").trim()))
+    : [];
   const unapproved = out.filter((r) => r.approved === false);
+  const noBaseline = out.some((r) => r.approvalBasis === "no-baseline");
+
+  // Fail closed before any output mode can return 0 on an empty scan (wrong
+  // working directory, missing build context). Applies to --json too.
+  if (FROZEN && !out.length) {
+    stderr.write("depcheck: --frozen found no supported manifests — refusing to pass a deploy gate on nothing\n");
+    exit(2);
+  }
+
+  // The request is a developer-facing artifact, not an approval: it writes only
+  // to stdout and keeps the gate's exit code so CI still fails.
+  if (PRINT_APPROVAL_REQUEST && !JSON_OUT) {
+    if (!APPROVAL_ON) {
+      stderr.write("depcheck: --print-approval-request needs the approval gate on (--approved=<path> or .deps-policy.json → approved)\n");
+      exit(2);
+    }
+    const entries = await buildApprovalRequest(out);
+    stdout.write(JSON.stringify({
+      $comment: "Paste into approved.json → entries. If an entry for this name already exists (e.g. a version-pinned approval being bumped), update it instead of adding a duplicate. Blank approvedBy/date means the request is still PENDING: a security reviewer must check the evidence, fill the record, and commit that change (CODEOWNERS makes the diff the sign-off).",
+      entries,
+    }, null, 2) + "\n");
+    if (!entries.length) stderr.write("depcheck: nothing to request — every in-scope direct dep has an approval record\n");
+    exit(out.filter(isBlocking).length ? 1 : 0);
+  }
 
   if (JSON_OUT) {
     const failing = out.filter(isBlocking);
@@ -646,18 +832,36 @@ async function main() {
       version: pkgVersion,
       cooldownDays: COOLDOWN_DAYS,
       strict: STRICT,
+      frozen: FROZEN,
       compromisedEntries: COMPROMISED.length,
-      approvalGate: { active: APPROVAL_ON, entries: APPROVALS.length, stale: staleApprovals.map((e) => e.name), overdue: overdueApprovals.map((e) => e.name) },
+      approvalGate: {
+        active: APPROVAL_ON,
+        scope: APPROVAL_SCOPE,
+        entries: APPROVALS.length,
+        unapproved: unapproved.map((r) => r.name),
+        incomplete: unapproved.filter((r) => r.approvalMissing?.length).map((r) => r.name),
+        stale: staleApprovals.map((e) => e.name),
+        overdue: overdueApprovals.map((e) => e.name),
+        weak: weakApprovals.map((e) => e.name),
+      },
+      approvalRequest: APPROVAL_ON ? await buildApprovalRequest(out) : [],
       skipped,
       rows: out,
     }, null, 2) + "\n");
     exit(failing.length ? 1 : 0);
   }
 
-  if (!out.length) { stdout.write("depcheck: no supported manifests found.\n"); exit(0); }
+  if (!out.length) {
+    stdout.write("depcheck: no supported manifests found.\n");
+    exit(0);
+  }
 
-  stdout.write(`\ndepcheck v${pkgVersion}  (cooldown=${COOLDOWN_DAYS}d, ${COMPROMISED.length} compromised entr${COMPROMISED.length === 1 ? "y" : "ies"}, approvals ${APPROVAL_ON ? APPROVALS.length : "off"}, scanned ${new Set(out.map((r) => r.file)).size} file(s), ${STRICT ? "strict (transitive + fresh pins fail)" : "direct-only (transitive/fresh = advisory)"})\n`);
+  stdout.write(`\ndepcheck v${pkgVersion}  (cooldown=${COOLDOWN_DAYS}d, ${COMPROMISED.length} compromised entr${COMPROMISED.length === 1 ? "y" : "ies"}, approvals ${APPROVAL_ON ? `${APPROVALS.length}, scope=${APPROVAL_SCOPE}` : "off"}${FROZEN ? ", frozen" : ""}, scanned ${new Set(out.map((r) => r.file)).size} file(s), ${STRICT ? "strict (transitive + fresh pins fail)" : "direct-only (transitive/fresh = advisory)"})\n`);
   if (NO_BASELINE) stdout.write("baseline: disabled (--no-baseline) — new adoptions will report as TOO_NEW, not UNAGED_NEW_DEP\n");
+  if (APPROVAL_ON && APPROVAL_SCOPE === "new") {
+    stdout.write(`approvals: scope=new — only direct dep names added since ${BASELINE_REV} need sign-off${noBaseline ? "; no usable baseline, so every direct dep is treated as new" : ""}\n`);
+  }
+  if (FROZEN) stdout.write("frozen: deploy gate — scope=all, strict, approved list required\n");
   if (skipped.length) stdout.write(`pyproject: ${skipped.length} non-exact specifier(s) not evaluated (see --json)\n`);
   stdout.write("\n");
 
@@ -690,11 +894,19 @@ async function main() {
   stdout.write("\n");
 
   if (APPROVAL_ON) {
-    stdout.write(`Approvals: ${unapproved.length} unapproved direct dep(s)`);
+    const incomplete = unapproved.filter((r) => r.approvalMissing?.length);
+    const unlisted = unapproved.length - incomplete.length;
+    stdout.write(`Approvals: ${unapproved.length} unapproved direct dep(s) (${unlisted} no matching entry, ${incomplete.length} incomplete record)`);
     if (staleApprovals.length) stdout.write(`, ${staleApprovals.length} stale (approved but not in any manifest: ${staleApprovals.slice(0, 5).map((e) => e.name).join(", ")}${staleApprovals.length > 5 ? ", …" : ""})`);
     if (overdueApprovals.length) stdout.write(`, ${overdueApprovals.length} review overdue (${overdueApprovals.slice(0, 5).map((e) => e.name).join(", ")})`);
+    if (weakApprovals.length) stdout.write(`, ${weakApprovals.length} missing rationale/reviewBy (required under --strict)`);
     stdout.write("\n");
-    if (unapproved.length) stdout.write("UNAPPROVED: add each direct dep to the approved list with a rationale, or remove it. Transitive deps are not name-gated.\n");
+    for (const r of unapproved.slice(0, 5)) stdout.write(`  unapproved ${r.name}: ${r.approvalIssue}\n`);
+    if (unapproved.length > 5) stdout.write(`  … ${unapproved.length - 5} more (see --json)\n`);
+    if (unapproved.length) {
+      stdout.write("UNAPPROVED: add each unapproved direct dep to the list with a rationale, or remove it. Transitive deps are not name-gated.\n");
+      stdout.write("Request the entries with review evidence: --print-approval-request\n");
+    }
   }
 
   const fail = out.filter(isBlocking);
