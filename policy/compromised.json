@@ -1,0 +1,20 @@
+{
+  "$comment": "Known-bad releases. Never adoptable: no cooldown exception, no override, no --strict bypass. depcheck marks these COMPROMISED and always fails. Add entries with a source, then review quarterly.",
+  "updated": "2026-10-22",
+  "entries": [
+    {
+      "ecosystem": "pypi",
+      "name": "litellm",
+      "versions": ["1.82.7", "1.82.8", "1.107.0"],
+      "ranges": [],
+      "reason": "PyPI publish token stolen via a compromised Trivy GitHub Action in the project's CI; wheels ship a .pth credential stealer plus an hourly remote code loader (harvests SSH keys, cloud credentials, browser passwords, shell history, AI-tool configs; installs a persistence daemon). 1.107.0 also shipped in Docker images.",
+      "advisories": [
+        "https://www.stepsecurity.io/blog/litellm-1-107-0-compromised-pypi-backdoored-wheels-credential-stealer",
+        "https://www.trendmicro.com/en_us/research/26/c/your-ai-stack-just-handed-over-your-root-keys-inside-the-litellm-pypi-breach.html",
+        "https://digital.nhs.uk/cyber-alerts/2026/cc-4761"
+      ],
+      "added": "2026-10-22",
+      "reviewBy": "2027-01-22"
+    }
+  ]
+}
