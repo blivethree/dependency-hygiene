@@ -61,9 +61,14 @@ async function startRegistry(bodies) {
 }
 
 async function runCLI(dir, registryUrl, args = [], env = {}) {
+  // GitHub Actions exports GITHUB_BASE_REF on pull_request. These tests build
+  // throwaway git repos, so an inherited base ref would point at a baseline
+  // that does not exist. Only use it when a test passes it explicitly.
+  const inherited = { ...process.env };
+  delete inherited.GITHUB_BASE_REF;
   try {
     const { stdout, stderr } = await execFileAsync("node", [SCRIPT, dir, ...args], {
-      env: { ...process.env, DEPCHECK_PYPI_INDEX: registryUrl, DEPCHECK_NPM_REGISTRY: registryUrl, ...env },
+      env: { ...inherited, DEPCHECK_PYPI_INDEX: registryUrl, DEPCHECK_NPM_REGISTRY: registryUrl, ...env },
     });
     return { code: 0, stdout, stderr };
   } catch (e) {
