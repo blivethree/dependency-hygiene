@@ -270,7 +270,7 @@ record. Copy both into the app repo and adjust the team slug.
 Minimal PR gate:
 
 ```yaml
-- uses: actions/checkout@v4
+- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
   with: { fetch-depth: 0 }          # scope=new needs the baseline
 - run: node "$HOME/dependency-hygiene/scripts/depcheck.mjs" . --approved=approved.json
 ```
