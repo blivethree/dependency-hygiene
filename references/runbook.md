@@ -145,11 +145,19 @@ Review overrides quarterly; remove once the version ages out of cooldown.
   `TOO_NEW` with an "adoption age unverified" note.
 - `--strict` escalates transitive findings *and* `TOO_NEW`, for repos that want a hard gate.
 - **Approval gate (opt-in):** with `--approved=<path>` (or `.deps-policy.json → approved`)
-  every **direct** dep must appear in the list, with `rationale`/`approvedBy`/`date`/
-  `reviewBy`; otherwise it blocks. Transitive deps are deliberately not name-gated.
-  Bootstrap with `--seed-approved` (once, locally — never in CI), then fill in the
-  rationales. Stale entries (approved but unused) and overdue `reviewBy` dates are
-  reported as advisory so the list can be pruned instead of silently rotting.
+  direct deps must have an approval record.
+  - `--approval-scope=new` (default) gates only direct dep **names** that are new
+    relative to the git baseline; `all` gates the whole direct tree (audit/deploy).
+  - `approvedBy` + `date` are the sign-off. Blank fields are a **pending request**
+    and keep the build red. `--strict`/`--frozen` also require `rationale` + `reviewBy`.
+  - `--print-approval-request` emits paste-ready entries with the registry evidence
+    (age, first publish, releases, licence, known-bad).
+  - Bootstrap with `--seed-approved` once, locally — never in CI. Seeded entries are
+    flagged `grandfathered`; replace their rationale during review.
+  - Stale entries (approved but unused) and overdue `reviewBy` dates are reported as
+    advisory so the list can be pruned instead of silently rotting.
+  - `--frozen` is the deploy gate: requires the list, scope=all, strict, and exits 2
+    on an empty scan. Full process: `references/approval-workflow.md`.
 - **Integrity:** `--require-hashes` in a `requirements.txt` (or `--verify-integrity`)
   requires a `--hash=` for every pin (`NO_HASH`, blocking). `poetry.lock`/`uv.lock`
   `files = [{hash=…}]`, `Pipfile.lock` `hashes`, and `package-lock.json` `integrity`
@@ -159,6 +167,44 @@ Review overrides quarterly; remove once the version ages out of cooldown.
   is used via `DEPCHECK_PYPI_INDEX` / `DEPCHECK_NPM_REGISTRY`).
 - `snyk test --severity-threshold=high` runs in CI; base-image auto-fix PRs are **disabled** in Snyk project settings.
 - Rebuild cadence: CI rebuilds base images weekly and re-scans, so base CVEs clear without manual intervention.
+
+## E) New-dependency request (developer → security)
+
+Trigger: CI says `unapproved <pkg>: not on the approved list` (or an entry's
+`approval record incomplete`). The developer is not blocked from writing code —
+just from merging that dependency without a decision.
+
+1. **Question the need.** If an existing approved dependency covers it, use that.
+   Do not add a name just to get CI green.
+2. **Draft the request** on the PR branch:
+
+   ```bash
+   node ~/.agents/skills/dependency-hygiene/scripts/depcheck.mjs . \
+     --approved=approved.json --print-approval-request
+   ```
+
+   Paste the entry into `approved.json`. Leave `approvedBy`/`date` blank and commit.
+   The PR stays red: that is the pending state, visible in the diff.
+3. **Security review** (checklist in `references/approval-workflow.md`):
+   - `COMPROMISED`/`WITHDRAWN`/`YANKED` → stop, go to **A2**. Never "approve" one.
+   - Age + `firstPublished` + `releases`: a new name with no history is a
+     typosquat/takeover signal, not a library to approve.
+   - Licence, maintainer, advisories, and whether a hash/provenance exists.
+   - Write a real `rationale`: what it does, why nothing approved already does it,
+     and any residual risk (e.g. no lockfile hash).
+   - Decide the scope: leave it name-level, or pin `version`/`versions` for a
+     new/single-maintainer package so the next bump comes back.
+   - Fill `approvedBy`, `date`, `reviewBy`; commit. `CODEOWNERS` makes this diff the
+     security sign-off; branch protection is what enforces it.
+4. **Merge.** The merge commit contains the dependency, the justification, and the
+   approver — that is the audit record. No separate register to drift.
+5. **If rejected:** remove the dependency (or pin an approved alternative). Do not
+   leave a blank entry in the list "for later": a permanent pending entry trains
+   people to ignore the gate.
+
+**Deploy:** the pipeline runs `depcheck --frozen --verify-integrity` against the
+exact commit/tag being shipped. A missing approved list is exit `2` and must fail
+the deploy — never fall back to "no gate". Ship by digest and keep the SBOM.
 
 ## Escalation / decisions
 

@@ -163,6 +163,12 @@ unavailable and fresh pins stay `TOO_NEW` with "adoption age unverified". Option
 `--baseline=<sha>`, `actions/checkout` with `fetch-depth: 0`, or `--no-baseline` if the
 repo deliberately carries no history.
 
+On a `pull_request` event, `actions/checkout` checks out the **merge commit**, so
+`HEAD` already contains the PR and a HEAD baseline would report nothing new (and
+`scope=new` would silently pass). `depcheck` defaults to `origin/$GITHUB_BASE_REF`
+when that variable is set; on other CI, pass the base sha explicitly:
+`--baseline="$BASE_SHA"`.
+
 ## Exit-code contract changed in 0.2.0
 
 `COMPROMISED`, `WITHDRAWN`, `YANKED` and `UNAGED_NEW_DEP` are new blocking statuses;
@@ -170,24 +176,60 @@ repo deliberately carries no history.
 upgrade — that is intended. To stage the rollout, pin the tooling repo by SHA; the
 report header prints `depcheck vX.Y.Z`.
 
-## `APPROVED no` on a dep that was fine yesterday
+## `APPROVED no` on a dep I didn't touch
 
-The approval gate is only active when a list is supplied (`--approved=<path>` or
-`.deps-policy.json → approved`). When it is, **any direct dep missing from the list
-blocks**, including one that was already there before the list existed.
+Since 0.4.0 the default is `--approval-scope=new`: only direct dep **names** that
+are new relative to the git baseline are gated, so a pre-existing dep shows `—`
+(not in scope) even when it is not on the list. If you are seeing `no` for a dep you
+did not add:
 
-To bootstrap without hand-writing the file:
+- you (or CI) passed `--approval-scope=all` or `--frozen` — that is the audit/deploy
+  view, and it is supposed to gate the whole tree; or
+- there is no usable baseline (no commits, untracked manifest, `--no-baseline`), and
+  `scope=new` fails closed by treating every direct dep as new.
+
+Fetch history (`fetch-depth: 0`) or pass `--baseline=<rev>`, then bootstrap below.
+
+## `approval record incomplete` on an entry that looks filled in
+
+`approvedBy` + `date` are the sign-off; `rationale` + `reviewBy` are required once
+you pass `--strict` (and `--frozen` implies both). A blank `approvedBy` (or a missing
+`date`) is a **pending request**, not an approval — that is deliberate, so a
+developer cannot self-approve by pasting a name.
+
+Get the paste-ready entry with evidence:
+
+```bash
+node scripts/depcheck.mjs . --approved=approved.json --print-approval-request
+```
+
+Have security fill the record and commit it. Do not fill `approvedBy` in the same
+commit as the dependency just to get green.
+
+## `--frozen` exits 2
+
+The deploy gate refuses to run without a policy instead of silently passing:
+
+- no approved list (`--approved=<path>` / `.deps-policy.json → approved`) → exit 2;
+- no supported manifests in the scanned path → exit 2 (probably the wrong working
+  directory / build context);
+- an unknown flag value (e.g. `--approval-scope=sometimes`) → exit 2.
+
+Exit 1 means it ran and found unapproved, incomplete, or otherwise blocking rows.
+Never "fix" this by dropping `--frozen` from the deploy job; fix the record.
+
+## Bootstrapping the approved list
 
 ```bash
 node scripts/depcheck.mjs . --approved=approved.json --seed-approved
 ```
 
-Then fill in `rationale`/`approvedBy` and commit. Do not run `--seed-approved` in CI:
-a list that regenerates itself is a lockfile, not an approval record. Entries for
-packages you no longer use show up as `stale` — prune them, don't ignore the line.
-
-A version-pinned entry (`"version": "1.2.3"`) intentionally stops covering a bump:
-that is a prompt for a fresh look, not a bug.
+This writes one `grandfathered: true` entry per current direct dep. It is a one-off
+local bootstrap, **not** an approval: have security replace the rationale and sign
+off. Never run it in CI — a list that regenerates itself is a lockfile, not an
+approval record. Entries for packages you no longer use show up as `stale`; prune
+them. A version-pinned entry (`"version": "1.2.3"`) intentionally stops covering a
+bump: that is a prompt for a fresh look, not a bug.
 
 ## `NO_HASH` after adopting hashes
 

@@ -68,6 +68,30 @@ A denylist is retrospective and a cooldown only delays adoption; neither answers
   old ≠ unsafe), and full-tree approval (use Dependency-Track/SBOM tooling).
 - `npm test` — 40 tests, still stdlib only and offline.
 
+## Phase 6 — PR review / approval workflow (DONE, v0.4.0)
+
+The approval list existed, but it still turned the whole legacy tree red and had no
+defined review path. Phase 6 turns it into a PR gate a security team can actually
+run, with an audit trail.
+
+- `--approval-scope=new|all` — `new` (default) gates only direct dep **names** added
+  since the git baseline, so developers keep working; `all` is the audit/deploy
+  view. No usable baseline fails closed.
+- Approval records are validated: `approvedBy` + `date` are the sign-off (blank =
+  pending request, still blocking); `--strict`/`--frozen` also require `rationale`
+  + `reviewBy`.
+- `--print-approval-request` (and `approvalRequest` in `--json`) emits paste-ready
+  entries with registry evidence: version age, first publish, release count,
+  licence, known-bad flag. The evidence lands in the record the reviewer signs.
+- `--frozen` — deploy gate: requires the list, forces scope=all + strict, exits 2
+  on an empty scan. Overdue reviews stay advisory so a lapsed review cannot take
+  production down; incomplete records do block.
+- `references/approval-workflow.md`, `examples/deps.yml`, `examples/CODEOWNERS` —
+  request → review → approve → deploy → audit, plus the CI/ownership wiring.
+- Deliberately not done: auto-approval, transitive name gating, and keeping the
+  approval record outside git (the repo history is the audit trail).
+- `npm test` — 54 tests, still stdlib only and offline.
+
 ## Why a repo (not a single script)
 
 So every machine you code on gets the *same* version: `git pull` and you're

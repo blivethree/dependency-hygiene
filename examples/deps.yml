@@ -1,0 +1,100 @@
+# Copy to .github/workflows/deps.yml in each app repo.
+#
+# Replace <your-org>. Requires:
+#   - approved.json in the repo (seed once locally, then review it)
+#   - .github/CODEOWNERS covering approved.json (see examples/CODEOWNERS)
+#   - branch protection on main: "depcheck (PR scope)" is a required check,
+#     direct pushes are disabled, stale approvals are dismissed on new commits
+#   - production credentials only on the deploy-gate job (or a downstream job
+#     that `needs:` it), so the frozen gate cannot be skipped
+#
+# The PR job only gates direct dep *names* that are new vs the base branch, so
+# ordinary work is not blocked. The deploy job gates the whole direct tree.
+
+name: dependency gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DHH: ${{ github.workspace }}/.dependency-hygiene
+  # PRs: compare against the target-branch commit (a PR checkout is the merge
+  # commit, so HEAD would already contain the change). Push/manual: HEAD.
+  BASELINE: ${{ github.event.pull_request.base.sha || 'HEAD' }}
+
+jobs:
+  depcheck:
+    name: depcheck (PR scope)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # scope=new needs the base-branch manifests
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependency-hygiene tooling
+        run: git clone --depth 1 https://github.com/<your-org>/dependency-hygiene.git "$DHH"
+
+      - name: Dependency gate
+        run: node "$DHH/scripts/depcheck.mjs" . --approved=approved.json --baseline="$BASELINE" --json > depcheck.json
+
+      # The gate above failed; give the developer the exact paste-ready entry,
+      # including the registry evidence the reviewer needs.
+      - name: Approval request (paste-ready)
+        if: failure()
+        run: |
+          {
+            echo '```json'
+            node "$DHH/scripts/depcheck.mjs" . \
+              --approved=approved.json --baseline="$BASELINE" --print-approval-request || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: depcheck-report
+          path: depcheck.json
+          if-no-files-found: ignore
+
+  deploy-gate:
+    name: depcheck (frozen deploy gate)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: depcheck
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependency-hygiene tooling
+        run: git clone --depth 1 https://github.com/<your-org>/dependency-hygiene.git "$DHH"
+
+      # Fail closed: no approved list -> exit 2; any unapproved/incomplete
+      # direct dep -> exit 1; strict (rationale/reviewBy required); hashes
+      # required for every pin. Run this against the exact commit/tag you built.
+      - name: Frozen dependency gate
+        run: node "$DHH/scripts/depcheck.mjs" . --approved=approved.json --frozen --verify-integrity
+
+# Weekly audit (optional, run separately so it does not block PRs):
+#
+#   node "$DHH/scripts/depcheck.mjs" . --approved=approved.json \
+#     --approval-scope=all --json > approval-audit.json
+#
+# Triage `stale`, `overdue`, `weak` and `grandfathered` entries; open a ticket
+# rather than breaking a deploy.
