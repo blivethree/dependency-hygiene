@@ -1,0 +1,31 @@
+{
+  "$comment": "Approved DIRECT dependencies. Activate with --approved=<this file> or by copying the 'approved' array into <repo>/.deps-policy.json. Bootstrap with: depcheck --approved=approved.json --seed-approved. Name-level by default; add \"version\" (or \"versions\") to require a fresh approval on every bump. Transitive deps are not name-gated — a 500-entry allowlist rots into rubber-stamping, and hashes (--require-hashes / lock integrity) are what actually pin the bytes.",
+  "updated": "2026-10-22",
+  "entries": [
+    {
+      "ecosystem": "pypi",
+      "name": "fastapi",
+      "rationale": "HTTP framework; already reviewed at intro. MIT licence.",
+      "approvedBy": "platform-team",
+      "date": "2026-10-22",
+      "reviewBy": "2027-01-20"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "zod",
+      "rationale": "Runtime schema validation; replaces hand-written guards.",
+      "approvedBy": "platform-team",
+      "date": "2026-10-22",
+      "reviewBy": "2027-01-20"
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "litellm",
+      "versions": ["1.106.2"],
+      "rationale": "Pinned to the last release before the Oct 2026 takeover. Never adopt 1.82.7/1.82.8/1.107.0 (see policy/compromised.json).",
+      "approvedBy": "security",
+      "date": "2026-10-22",
+      "reviewBy": "2026-11-05"
+    }
+  ]
+}

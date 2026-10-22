@@ -5,6 +5,7 @@
 //
 //   node scripts/depcheck.mjs [paths...] [--cooldown=14] [--json] [--strict] [--fix]
 //        [--policy=path] [--compromised=path] [--baseline=rev] [--no-baseline]
+//        [--approved=path] [--seed-approved] [--verify-integrity]
 //
 //   - COMPROMISED / WITHDRAWN / YANKED always block: any ecosystem, any scope.
 //   - UNAGED_NEW_DEP blocks a *newly introduced* pin younger than the cooldown
@@ -12,6 +13,11 @@
 //     that are merely young are TOO_NEW (advisory).
 //   - TOO_NEW is advisory unless --strict; it carries a revisitAfter date.
 //   - Transitive deps are advisory by default -> --strict escalates scope+status.
+//   - NO_HASH blocks when hashes are required (--require-hashes / --verify-integrity):
+//     an unverified pin can be swapped by a compromised registry account.
+//   - With --approved (or .deps-policy.json → approved) a direct dep that is not
+//     on the list is unapproved -> blocking. Transitive deps are not name-gated:
+//     a 500-entry allowlist rots into rubber-stamping.
 //   - One registry fetch per package name (cached), so big lockfiles stay cheap.
 //   exit 0 = clean, 1 = violations, 2 = could not run.
 import { execFile } from "node:child_process";
@@ -29,7 +35,7 @@ const TOOL_ROOT = resolve(SCRIPT_DIR, "..");
 
 // ── args ──
 // Flags that take a value; the value must not be mistaken for a scan directory.
-const VALUE_FLAGS = new Set(["policy", "cooldown", "compromised", "baseline"]);
+const VALUE_FLAGS = new Set(["policy", "cooldown", "compromised", "baseline", "approved"]);
 const rawArgs = argv.slice(2);
 const flagValue = (name) => {
   const eq = rawArgs.find((a) => a.startsWith(`--${name}=`));
@@ -51,6 +57,8 @@ const JSON_OUT = hasFlag("json");
 const FIX = hasFlag("fix");
 const STRICT = hasFlag("strict");
 const NO_BASELINE = hasFlag("no-baseline");
+const SEED_APPROVED = hasFlag("seed-approved");
+const VERIFY_INTEGRITY = hasFlag("verify-integrity");
 const BASELINE_REV = flagValue("baseline") || "HEAD";
 
 const PYPI_INDEX = (env.DEPCHECK_PYPI_INDEX || "https://pypi.org/pypi").replace(/\/+$/, "");
@@ -97,6 +105,34 @@ const COMPROMISED = [
   ...(CLI_POLICY?.compromised || []),
   ...REPO_POLICIES.flatMap((p) => p.compromised || []),
 ].filter((e) => e && e.name).map((e) => ({ ...e, ecosystem: normEco(e.ecosystem || "pypi") }));
+
+// ── config: approved direct dependencies (opt-in gate) ──
+// Active only when a list is supplied, so existing CI does not go red on upgrade.
+const APPROVED_PATH = flagValue("approved");
+const APPROVED_FILE = APPROVED_PATH ? await loadJSON(APPROVED_PATH, undefined) : undefined;
+if (APPROVED_PATH && APPROVED_FILE === undefined && !SEED_APPROVED) {
+  stderr.write(`depcheck: cannot read approved list: ${APPROVED_PATH} (use --seed-approved to create it)\n`);
+  exit(2);
+}
+const APPROVALS = [
+  ...(Array.isArray(APPROVED_FILE) ? APPROVED_FILE : APPROVED_FILE?.entries || []),
+  ...(Array.isArray(POLICY?.approved) ? POLICY.approved : []),
+].filter((e) => e && e.name).map((e) => ({ ...e, ecosystem: normEco(e.ecosystem || "pypi") }));
+const APPROVAL_ON = Boolean(APPROVED_PATH) || Array.isArray(POLICY?.approved);
+
+// undefined = gate off; true/false = decision. Name-level unless the entry pins
+// a version/versions, in which case a bump needs a fresh decision.
+function approvalFor(dep) {
+  if (!APPROVAL_ON) return undefined;
+  const eco = normEco(dep.ecosystem), name = normName(dep.name), v = dep.current ? String(dep.current) : null;
+  const hit = APPROVALS.find((e) => {
+    if (e.ecosystem && e.ecosystem !== eco) return false;
+    if (normName(e.name) !== name) return false;
+    const pinned = e.version ? [String(e.version)] : (e.versions || []).map(String);
+    return pinned.length === 0 || (v !== null && pinned.includes(v));
+  });
+  return Boolean(hit);
+}
 
 export function compromisedHit(dep) {
   if (!dep?.name) return null;
@@ -222,14 +258,24 @@ export function classify(dep, reg) {
 }
 
 // ── parsers ──
+// `--hash=` lines follow the requirement they belong to (pip's
+// --require-hashes format), including `\` continuations.
 export function parseRequirements(text) {
   const deps = [];
+  let cur = null;
   for (const line of text.split("\n")) {
     const raw = line.trim();
-    if (!raw || raw.startsWith("#") || raw.startsWith("-e ") || raw.startsWith("--")) continue;
-    const m = raw.match(/^([A-Za-z0-9_.\-]+(?:\[[^\]]*\])?)\s*(==|~=|>=|<=|!=|>|<|===)?\s*([^;\s]*)/);
-    if (!m) continue;
-    deps.push({ ecosystem: "pypi", name: m[1].replace(/\[.*\]$/, ""), op: m[2] || null, current: m[3] || null });
+    if (!raw || raw.startsWith("#")) continue;
+    if (raw.startsWith("-e ")) { cur = null; continue; }
+    if (raw.startsWith("--")) {
+      const h = raw.match(/^--hash=(?:sha256:)?([0-9a-f]{16,})/i);
+      if (h && cur) cur.hashes.push(h[1]);
+      continue;
+    }
+    const m = raw.match(/^([A-Za-z0-9_.\-]+(?:\[[^\]]*\])?)\s*(==|~=|>=|<=|!=|>|<|===)?\s*([^;\\\s]*)/);
+    if (!m) { cur = null; continue; }
+    cur = { ecosystem: "pypi", name: m[1].replace(/\[.*\]$/, ""), op: m[2] || null, current: m[3] || null, hashes: [] };
+    deps.push(cur);
   }
   return deps;
 }
@@ -239,7 +285,14 @@ export function parseLock(text) {
   const deps = [];
   for (const [key, meta] of Object.entries(lock.packages || {})) {
     if (key === "" || !meta || !meta.version) continue;
-    deps.push({ ecosystem: "npm", name: key.replace(/^node_modules\//, ""), op: "locked", current: meta.version, dev: !!meta.dev });
+    deps.push({
+      ecosystem: "npm",
+      name: key.replace(/^node_modules\//, ""),
+      op: "locked",
+      current: meta.version,
+      dev: !!meta.dev,
+      hashes: meta.integrity ? [meta.integrity] : [],
+    });
   }
   return deps;
 }
@@ -250,29 +303,35 @@ export function parsePipfileLock(text) {
   for (const section of ["default", "develop"]) {
     for (const [name, meta] of Object.entries(lock[section] || {})) {
       const v = String(meta?.version || "").replace(/^==/, "");
-      deps.push({ ecosystem: "pypi", name, op: v ? "==" : null, current: v || null, dev: section === "develop" });
+      deps.push({ ecosystem: "pypi", name, op: v ? "==" : null, current: v || null, dev: section === "develop", hashes: meta?.hashes || [] });
     }
   }
   return deps;
 }
 
-// poetry.lock and uv.lock both use `[[package]]` stanzas with name/version.
+// poetry.lock and uv.lock both use `[[package]]` stanzas with name/version and
+// (normally) `hash = "sha256:…"` entries in the stanza's `files` list.
 export function parseTomlPackages(text) {
   const deps = [];
   let cur = null;
+  const flush = () => {
+    if (cur?.name && cur?.version) deps.push(cur);
+    cur = null;
+  };
   for (const line of text.split("\n")) {
     const t = line.trim();
-    if (t === "[[package]]") { cur = {}; continue; }
+    if (t === "[[package]]") { flush(); cur = { ecosystem: "pypi", name: null, version: null, op: "locked", current: null, hashes: [] }; continue; }
     if (!cur) continue;
-    if (t.startsWith("[")) { cur = null; continue; } // next table, e.g. [package.dependencies]
     const m = t.match(/^(name|version)\s*=\s*"([^"]+)"/);
-    if (!m) continue;
-    cur[m[1]] = m[2];
-    if (cur.name && cur.version) {
-      deps.push({ ecosystem: "pypi", name: cur.name, op: "locked", current: cur.version });
-      cur = null;
+    if (m) {
+      cur[m[1]] = m[2];
+      if (m[1] === "version") cur.current = m[2];
+      continue;
     }
+    const h = t.match(/hash\s*=\s*"sha256:([0-9a-f]{16,})"/i);
+    if (h) cur.hashes.push(h[1]);
   }
+  flush();
   return deps;
 }
 
@@ -414,14 +473,27 @@ const BLOCKING_ALWAYS = new Set(["COMPROMISED", "WITHDRAWN", "YANKED"]);
 const ADVISORY_ONLY = new Set(["TOO_NEW"]);
 // Report worst-first so a known-bad pin is never buried under a page of OK rows.
 const STATUS_ORDER = {
-  COMPROMISED: 0, WITHDRAWN: 1, YANKED: 2, UNAGED_NEW_DEP: 3,
-  OUTDATED: 4, UNPINNED: 5, PRERELEASE: 6, UNRESOLVING: 7, TOO_NEW: 8, OK: 9,
+  COMPROMISED: 0, WITHDRAWN: 1, YANKED: 2, UNAGED_NEW_DEP: 3, NO_HASH: 4,
+  OUTDATED: 5, UNPINNED: 6, PRERELEASE: 7, UNRESOLVING: 8, TOO_NEW: 9, OK: 10,
 };
 function isBlocking(r) {
+  // Approval is orthogonal to freshness: an aged, safe pin can still be unvetted.
+  if (r.approved === false && r.direct === "direct") return true;
   if (r.status === "OK") return false;
   if (BLOCKING_ALWAYS.has(r.status)) return true;
   if (ADVISORY_ONLY.has(r.status)) return STRICT;
   return r.direct === "direct" || STRICT;
+}
+
+// Hashes are the only control that survives a compromised registry account: a
+// name+version approval cannot tell you the bytes changed.
+function requiresIntegrity(file, text) {
+  if (VERIFY_INTEGRITY) return true;
+  return file.endsWith("requirements.txt") && /^--require-hashes/m.test(text);
+}
+function applyIntegrity(row, dep) {
+  if ((dep.hashes || []).length || BLOCKING_ALWAYS.has(row.status)) return row;
+  return { ...row, status: "NO_HASH", note: "no hash/integrity recorded for this pin — the bytes are unverifiable" };
 }
 
 // --fix: rewrite exact `pkg==x` pins in requirements.txt to the cooldown-safe
@@ -461,9 +533,12 @@ async function scan() {
   const pkgVersion = (await loadJSON(join(TOOL_ROOT, "package.json"), {}))?.version || "0.0.0";
 
   const parsed = new Map();
+  const texts = new Map();
   const skipped = [];
   for (const f of manifests) {
-    const { deps, skipped: sk } = parseText(f, await readFile(f, "utf8"));
+    const text = await readFile(f, "utf8");
+    texts.set(f, text);
+    const { deps, skipped: sk } = parseText(f, text);
     parsed.set(f, deps);
     for (const s of sk) skipped.push({ file: relative(cwd(), f), dep: s });
   }
@@ -480,11 +555,12 @@ async function scan() {
     const base = f.split("/").pop();
     if (NAME_ONLY_MANIFESTS.has(base)) continue;
     const isLock = LOCK_MANIFESTS.has(base);
+    const integrity = requiresIntegrity(f, texts.get(f) || "");
     for (const d of deps) {
       const reg = await registryFor(d);
-      const row = classify(d, reg);
       const direct = isLock ? (directNames.has(`${normEco(d.ecosystem)}:${normName(d.name)}`) ? "direct" : "transitive") : "direct";
-      const finalRow = await applyAdoptionRule(d, f, row);
+      let finalRow = await applyAdoptionRule(d, f, classify(d, reg));
+      if (integrity) finalRow = applyIntegrity(finalRow, d);
       const eco = normEco(d.ecosystem);
       rows.push({
         file: relative(cwd(), f),
@@ -494,6 +570,7 @@ async function scan() {
         current: d.current || "—",
         latest: reg?.latest || "—",
         direct,
+        approved: approvalFor(d),
         ...finalRow,
       });
     }
@@ -513,6 +590,35 @@ async function scan() {
   return { rows: out, skipped, pkgVersion };
 }
 
+// --seed-approved: bootstrap the list from the current direct deps, so the gate
+// does not start life as a wall of red (which gets rubber-stamped).
+async function seedApprovals(rows) {
+  if (!APPROVED_PATH) {
+    stderr.write("depcheck: --seed-approved needs --approved=<path>\n");
+    exit(2);
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const reviewBy = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
+  const entries = rows
+    .filter((r) => r.direct === "direct" && !BLOCKING_ALWAYS.has(r.status) && r.status !== "UNRESOLVING")
+    .map((r) => ({
+      ecosystem: normEco(r.ecosystem),
+      name: r.name,
+      rationale: "",
+      approvedBy: env.USER || "unset",
+      date: today,
+      reviewBy,
+    }));
+  const body = {
+    $comment: "Approved direct dependencies. Adding or replacing a direct dep needs a human decision here. Name-level by default; add \"version\" (or \"versions\") to require a fresh approval on bump.",
+    updated: today,
+    entries,
+  };
+  await writeFile(APPROVED_PATH, JSON.stringify(body, null, 2) + "\n");
+  stderr.write(`seed-approved: wrote ${entries.length} entries to ${APPROVED_PATH} — fill in rationale before committing\n`);
+  exit(0);
+}
+
 async function main() {
   let { rows: out, skipped, pkgVersion } = await scan();
 
@@ -526,45 +632,70 @@ async function main() {
     }
   }
 
+  if (SEED_APPROVED) await seedApprovals(out);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const directKeys = new Set(out.filter((r) => r.direct === "direct").map((r) => `${normEco(r.ecosystem)}:${normName(r.name)}`));
+  const staleApprovals = APPROVAL_ON ? APPROVALS.filter((e) => !directKeys.has(`${e.ecosystem}:${normName(e.name)}`)) : [];
+  const overdueApprovals = APPROVAL_ON ? APPROVALS.filter((e) => e.reviewBy && e.reviewBy < today) : [];
+  const unapproved = out.filter((r) => r.approved === false);
+
   if (JSON_OUT) {
     const failing = out.filter(isBlocking);
-    stdout.write(JSON.stringify({ version: pkgVersion, cooldownDays: COOLDOWN_DAYS, strict: STRICT, compromisedEntries: COMPROMISED.length, skipped, rows: out }, null, 2) + "\n");
+    stdout.write(JSON.stringify({
+      version: pkgVersion,
+      cooldownDays: COOLDOWN_DAYS,
+      strict: STRICT,
+      compromisedEntries: COMPROMISED.length,
+      approvalGate: { active: APPROVAL_ON, entries: APPROVALS.length, stale: staleApprovals.map((e) => e.name), overdue: overdueApprovals.map((e) => e.name) },
+      skipped,
+      rows: out,
+    }, null, 2) + "\n");
     exit(failing.length ? 1 : 0);
   }
 
   if (!out.length) { stdout.write("depcheck: no supported manifests found.\n"); exit(0); }
 
-  stdout.write(`\ndepcheck v${pkgVersion}  (cooldown=${COOLDOWN_DAYS}d, ${COMPROMISED.length} compromised entr${COMPROMISED.length === 1 ? "y" : "ies"}, scanned ${new Set(out.map((r) => r.file)).size} file(s), ${STRICT ? "strict (transitive + fresh pins fail)" : "direct-only (transitive/fresh = advisory)"})\n`);
+  stdout.write(`\ndepcheck v${pkgVersion}  (cooldown=${COOLDOWN_DAYS}d, ${COMPROMISED.length} compromised entr${COMPROMISED.length === 1 ? "y" : "ies"}, approvals ${APPROVAL_ON ? APPROVALS.length : "off"}, scanned ${new Set(out.map((r) => r.file)).size} file(s), ${STRICT ? "strict (transitive + fresh pins fail)" : "direct-only (transitive/fresh = advisory)"})\n`);
   if (NO_BASELINE) stdout.write("baseline: disabled (--no-baseline) — new adoptions will report as TOO_NEW, not UNAGED_NEW_DEP\n");
   if (skipped.length) stdout.write(`pyproject: ${skipped.length} non-exact specifier(s) not evaluated (see --json)\n`);
   stdout.write("\n");
 
-  const headers = ["ECO", "PACKAGE", "CURRENT", "STATUS", "LATEST", "SCOPE", "NOTE"];
-  const keys = ["ecosystem", "name", "current", "status", "latest", "direct", "note"];
+  const headers = ["ECO", "PACKAGE", "CURRENT", "STATUS", "APPROVED", "LATEST", "SCOPE", "NOTE"];
+  const keys = ["ecosystem", "name", "current", "status", "approved", "latest", "direct", "note"];
   const cell = (r, k) => {
     if (k === "note") return r.note || "";
+    if (k === "approved") return r.approved === undefined ? "—" : r.approved ? "yes" : "no";
     return String(r[k] ?? "—");
   };
   const NOTE_W = 100;
   const truncate = (s, max) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
   const w = headers.map((h, i) => {
     const max = Math.max(h.length, ...out.map((r) => cell(r, keys[i]).length));
-    return keys[i] === "note" ? Math.min(max, NOTE_W) : max;
+    return keys[i] === "note" ? Math.min(max, NOTE_W) : keys[i] === "approved" ? Math.max(max, 8) : max;
   });
   stdout.write(headers.map((h, i) => h.padEnd(w[i])).join("  ") + "\n");
   for (const r of out) {
     const note = r.revisitAfter ? `${r.note} · eligible ${r.revisitAfter}` : r.note;
-    const line = ["ecosystem", "name", "current", "status", "latest", "direct"].map((k, i) => cell(r, k).padEnd(w[i])).join("  ") + "  " + truncate(note || "", NOTE_W);
-    const color = r.status === "OK" ? "\x1b[32m" : isBlocking(r) ? "\x1b[31m" : "\x1b[33m";
+    const line = ["ecosystem", "name", "current", "status", "approved", "latest", "direct"].map((k, i) => cell(r, k).padEnd(w[i])).join("  ") + "  " + truncate(note || "", NOTE_W);
+    const color = isBlocking(r) ? "\x1b[31m" : r.status === "OK" ? "\x1b[32m" : "\x1b[33m";
     stdout.write(color + line + "\x1b[0m\n");
   }
 
   const summary = {};
   for (const r of out) summary[r.status] = (summary[r.status] || 0) + 1;
   stdout.write("\nSummary: " + Object.entries(summary).map(([s, c]) => `${c} ${s}`).join(", "));
-  const advisory = out.filter((r) => r.status !== "OK" && !isBlocking(r));
+  const advisory = out.filter((r) => r.status !== "OK" && r.approved !== false && !isBlocking(r));
   if (advisory.length) stdout.write(`  | ${advisory.length} advisory (transitive/fresh pins; --strict to escalate)`);
   stdout.write("\n");
+
+  if (APPROVAL_ON) {
+    stdout.write(`Approvals: ${unapproved.length} unapproved direct dep(s)`);
+    if (staleApprovals.length) stdout.write(`, ${staleApprovals.length} stale (approved but not in any manifest: ${staleApprovals.slice(0, 5).map((e) => e.name).join(", ")}${staleApprovals.length > 5 ? ", …" : ""})`);
+    if (overdueApprovals.length) stdout.write(`, ${overdueApprovals.length} review overdue (${overdueApprovals.slice(0, 5).map((e) => e.name).join(", ")})`);
+    stdout.write("\n");
+    if (unapproved.length) stdout.write("UNAPPROVED: add each direct dep to the approved list with a rationale, or remove it. Transitive deps are not name-gated.\n");
+  }
 
   const fail = out.filter(isBlocking);
   if (fail.length) {

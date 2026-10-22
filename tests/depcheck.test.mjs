@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
-  classify, compromisedHit, parsePipfileLock, parsePyproject, parseRequirements, parseTomlPackages,
+  classify, compromisedHit, parseLock, parsePipfileLock, parsePyproject, parseRequirements, parseTomlPackages,
 } from "../scripts/depcheck.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -210,6 +210,41 @@ test("parsePyproject takes exact pins and reports ranged specs as skipped", () =
   assert.equal(deps.find((d) => d.name === "python"), undefined, "interpreter constraint is not a dependency");
 });
 
+test("parseRequirements attaches --hash lines to the preceding pin", () => {
+  const deps = parseRequirements([
+    "--require-hashes",
+    "acme-lib==1.0.0 \\",
+    "    --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "    --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "other==2.0.0",
+  ].join("\n"));
+  assert.equal(deps[0].hashes.length, 2);
+  assert.equal(deps[1].hashes.length, 0);
+  assert.equal(deps[1].current, "2.0.0");
+});
+
+test("parseTomlPackages collects hashes from poetry/uv `files` entries", () => {
+  const text = [
+    "[[package]]",
+    'name = "acme-lib"',
+    'version = "1.0.0"',
+    "files = [",
+    '    {file = "acme_lib-1.0.0.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},',
+    "]",
+    "",
+    "[package.dependencies]",
+    'other = ">=1.0"',
+  ].join("\n");
+  const deps = parseTomlPackages(text);
+  assert.equal(deps.length, 1);
+  assert.deepEqual(deps[0].hashes, ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
+});
+
+test("parseLock keeps npm integrity hashes", () => {
+  const deps = parseLock(JSON.stringify({ packages: { "": {}, "node_modules/acme": { version: "1.0.0", integrity: "sha512-abc" } } }));
+  assert.deepEqual(deps[0].hashes, ["sha512-abc"]);
+});
+
 // ── end-to-end CLI ──
 const REGISTRY = {
   "acme-lib": pypiBody({ "1.1.0": [1], "1.0.0": [20], "0.5.0": [40] }),
@@ -339,7 +374,135 @@ test("e2e: --json reports denylist size and machine-readable rows", async () => 
     assert.equal(code, 1);
     const out = JSON.parse(stdout);
     assert.ok(out.compromisedEntries >= 1);
-    assert.equal(out.version, "0.2.0");
+    assert.equal(out.version, "0.3.0");
     assert.equal(out.rows[0].status, "COMPROMISED");
+  } finally { await stub.close(); }
+});
+
+// ── approval gate (direct deps only) ──
+const approvedList = (entries) => JSON.stringify({ entries });
+
+test("e2e: approval gate is off unless a list is supplied", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==1.0.0\n" });
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline"]);
+    assert.equal(code, 0, stdout);
+    assert.match(stdout, /approvals off/);
+    assert.doesNotMatch(stdout, /UNAPPROVED/);
+  } finally { await stub.close(); }
+});
+
+test("e2e: an empty approved list denies every direct dep", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==1.0.0\n" });
+    const file = join(dir, "approved.json");
+    await writeFile(file, approvedList([]));
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline", `--approved=${file}`]);
+    assert.equal(code, 1, stdout);
+    assert.match(stdout, /UNAPPROVED/);
+  } finally { await stub.close(); }
+});
+
+test("e2e: a name-level approval admits any version of that name", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==1.0.0\n" });
+    const file = join(dir, "approved.json");
+    await writeFile(file, approvedList([{ ecosystem: "pypi", name: "acme-lib", rationale: "core lib" }]));
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline", `--approved=${file}`]);
+    assert.equal(code, 0, stdout);
+    assert.match(stdout, /yes/);
+  } finally { await stub.close(); }
+});
+
+test("e2e: a version-pinned approval does not cover a different version", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==1.0.0\n" });
+    const file = join(dir, "approved.json");
+    await writeFile(file, approvedList([{ ecosystem: "pypi", name: "acme-lib", version: "0.5.0" }]));
+    const { code } = await runCLI(dir, stub.url, ["--no-baseline", `--approved=${file}`]);
+    assert.equal(code, 1);
+  } finally { await stub.close(); }
+});
+
+test("e2e: .deps-policy.json can carry the approved list", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({
+      "requirements.txt": "acme-lib==1.0.0\n",
+      ".deps-policy.json": JSON.stringify({ cooldownDays: 14, approved: [{ ecosystem: "pypi", name: "acme-lib" }] }),
+    });
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline"]);
+    assert.equal(code, 0, stdout);
+    assert.match(stdout, /approvals 1/);
+  } finally { await stub.close(); }
+});
+
+test("e2e: --seed-approved bootstraps the list and then passes", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==1.0.0\n" });
+    const file = join(dir, "approved.json");
+    const seeded = await runCLI(dir, stub.url, ["--no-baseline", `--approved=${file}`, "--seed-approved"]);
+    assert.equal(seeded.code, 0, seeded.stderr);
+    const written = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(written.entries.map((e) => e.name), ["acme-lib"]);
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline", `--approved=${file}`]);
+    assert.equal(code, 0, stdout);
+  } finally { await stub.close(); }
+});
+
+test("e2e: stale and overdue approvals are reported, not fatal", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==1.0.0\n" });
+    const file = join(dir, "approved.json");
+    await writeFile(file, approvedList([
+      { ecosystem: "pypi", name: "acme-lib" },
+      { ecosystem: "pypi", name: "ghost-lib", reviewBy: "2020-01-01" },
+    ]));
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline", `--approved=${file}`]);
+    assert.equal(code, 0, stdout);
+    assert.match(stdout, /stale/);
+    assert.match(stdout, /ghost-lib/);
+    assert.match(stdout, /review overdue/);
+  } finally { await stub.close(); }
+});
+
+// ── integrity ──
+test("e2e: --require-hashes without hashes blocks as NO_HASH", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({ "requirements.txt": "--require-hashes\nacme-lib==1.0.0\n" });
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline"]);
+    assert.equal(code, 1, stdout);
+    assert.match(stdout, /NO_HASH/);
+  } finally { await stub.close(); }
+});
+
+test("e2e: --require-hashes with hashes passes", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({
+      "requirements.txt": "--require-hashes\nacme-lib==1.0.0 \\\n    --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    });
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline"]);
+    assert.equal(code, 0, stdout);
+  } finally { await stub.close(); }
+});
+
+test("e2e: --verify-integrity flags a lockfile entry with no hash", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({
+      "requirements.txt": "acme-lib==1.0.0\n",
+      "uv.lock": "[[package]]\nname = \"acme-lib\"\nversion = \"1.0.0\"\n",
+    });
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline", "--verify-integrity"]);
+    assert.equal(code, 1, stdout);
+    assert.match(stdout, /NO_HASH/);
   } finally { await stub.close(); }
 });
