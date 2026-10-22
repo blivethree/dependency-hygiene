@@ -2,11 +2,12 @@
   "name": "dependency-hygiene",
   "version": "0.4.0",
   "private": true,
-  "description": "depcheck + imgcheck: dependency freshness/age-gate/compromised-release denylist + base-image policy for your repos",
+  "description": "depcheck + imgcheck + ghacheck: dependency freshness/age-gate/compromised-release denylist + base-image policy + GitHub Actions pin policy for your repos",
   "license": "MIT",
   "bin": {
     "depcheck": "scripts/depcheck.mjs",
-    "imgcheck": "scripts/imgcheck.mjs"
+    "imgcheck": "scripts/imgcheck.mjs",
+    "ghacheck": "scripts/ghacheck.mjs"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs"
