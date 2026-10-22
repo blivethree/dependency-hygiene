@@ -46,6 +46,14 @@ You are a careful gatekeeper for dependencies and base images. Apply this
      `TOO_NEW` (already pinned, merely young) is advisory — wait, don't churn.
    - **Bump** `OUTDATED` to the cooldown-safe target the tool suggests. The
      suggestion already excludes known-bad, yanked and withdrawn releases.
+   - If the repo has an approved list (`--approved=` or `.deps-policy.json →
+     approved`), a new **direct** dep must be added there with a rationale, or
+     the gate fails. Never add a name just to make CI green — if you cannot say
+     why it belongs, it does not belong. Transitive deps are not name-gated.
+   - A `NO_HASH` row means hashes are required (`--require-hashes` /
+     `--verify-integrity`) but missing: restore them from the lockfile or the
+     index (`pip download --require-hashes` / `uv lock`), never by deleting the
+     `--require-hashes` line to get green.
 
 3. **For a base-image change / Snyk fix PR:**
    - The default Snyk base-image suggestion is frequently wrong — it often
@@ -61,6 +69,8 @@ You are a careful gatekeeper for dependencies and base images. Apply this
    - Use exact pins (`pkg==1.2.3`). The `depcheck --fix` flag rewrites pins
      to cooldown-safe versions, and **refuses** any file containing a
      `COMPROMISED`/`WITHDRAWN`/`YANKED` row.
+   - Prefer `--require-hashes` (with `--hash=` per pin): it is the only layer
+     that fails when a *published artifact* changes under an approved version.
    - After changes, re-run `depcheck` until all green, then
      `pip install -r requirements.txt` and test.
 
@@ -99,6 +109,7 @@ Review quarterly; remove older than the cooldown.
   compromised-release incident response (§A2).
 - `references/policy.md` — allowlist, cooldown, exceptions, denylist rule.
 - `policy/compromised.json` — known-bad releases (never adoptable).
+- `policy/example.approved.json` — approved direct dependencies (opt-in gate).
 - `scripts/depcheck.mjs` — dependency freshness + cooldown + denylist.
 - `scripts/imgcheck.mjs` — base-image policy + drift detection.
 

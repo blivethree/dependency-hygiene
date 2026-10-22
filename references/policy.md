@@ -28,6 +28,27 @@
    - If a compromised release is found pinned, treat it as a **security incident**
      (see `references/runbook.md`), not a dependency bump. The pin is the symptom;
      credential exposure is the finding.
+8. **Direct dependencies must be approved (opt-in).** When a repo supplies an
+   approved list (`--approved=<path>` or `.deps-policy.json → approved`), every
+   **direct** dep that is not on it is unapproved and blocks. The gate is off when no
+   list is supplied, so adopting it is a deliberate, per-repo decision.
+   - Approval is a review record, not a security control by itself: `litellm` was on
+     everyone's approved list when it was taken over. Names answer *"should this be in
+     our tree"*; hashes and provenance answer *"are these the bytes we reviewed"*.
+   - **Transitive deps are not name-gated.** A 500-entry allowlist is seeded by a
+     script and then rubber-stamped; that is a false assurance, not a gate.
+   - Name-level approval by default. Add `version`/`versions` to an entry when a bump
+     must require a fresh human decision.
+   - Entries need `rationale`, `approvedBy`, `date` and `reviewBy` (≈90 days).
+     `depcheck` reports approved-but-unused entries (prune them) and overdue reviews.
+   - Bootstrap with `depcheck --approved=<path> --seed-approved`, then fill in the
+     rationales before committing. Never seed into CI.
+9. **Hashes or it didn't happen.** If a `requirements.txt` uses `--require-hashes`,
+   every pin must carry at least one `--hash=` (`NO_HASH`, blocking). Lockfiles
+   (`poetry.lock`, `uv.lock`, `Pipfile.lock`, `package-lock.json`) already record
+   hashes/integrity — `--verify-integrity` checks any manifest for them.
+   - This is the only layer that survives a compromised registry account: a name and
+     version can be approved while the published artifact changes underneath it.
 
 ### Exception — security fixes may skip the cooldown
 
@@ -60,6 +81,7 @@ there (or keep it in-repo and point CI at it).
 - `scripts/depcheck.mjs` — dependency freshness + cooldown + compromised-release denylist.
 - `scripts/imgcheck.mjs` — base-image policy + drift detection.
 - `policy/compromised.json` — known-bad releases (never adoptable).
+- `policy/example.approved.json` — approved direct dependencies (opt-in gate).
 - `policy/example.deps-policy.json` — template per-repo policy.
 - `references/runbook.md` — how to act on findings.
 - Global `AGENTS.md` at `~/.config/opencode/AGENTS.md` loads the `dependency-hygiene` skill automatically.

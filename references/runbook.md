@@ -144,6 +144,17 @@ Review overrides quarterly; remove once the version ages out of cooldown.
   `--baseline=<rev>` or fetch more history; without it, new adoptions degrade to
   `TOO_NEW` with an "adoption age unverified" note.
 - `--strict` escalates transitive findings *and* `TOO_NEW`, for repos that want a hard gate.
+- **Approval gate (opt-in):** with `--approved=<path>` (or `.deps-policy.json → approved`)
+  every **direct** dep must appear in the list, with `rationale`/`approvedBy`/`date`/
+  `reviewBy`; otherwise it blocks. Transitive deps are deliberately not name-gated.
+  Bootstrap with `--seed-approved` (once, locally — never in CI), then fill in the
+  rationales. Stale entries (approved but unused) and overdue `reviewBy` dates are
+  reported as advisory so the list can be pruned instead of silently rotting.
+- **Integrity:** `--require-hashes` in a `requirements.txt` (or `--verify-integrity`)
+  requires a `--hash=` for every pin (`NO_HASH`, blocking). `poetry.lock`/`uv.lock`
+  `files = [{hash=…}]`, `Pipfile.lock` `hashes`, and `package-lock.json` `integrity`
+  are all inspected. This is the layer that catches a compromised *approved* package;
+  a name list cannot.
 - Tests: `npm test` (stdlib `node --test`, no installs, no network — a local stub registry
   is used via `DEPCHECK_PYPI_INDEX` / `DEPCHECK_NPM_REGISTRY`).
 - `snyk test --severity-threshold=high` runs in CI; base-image auto-fix PRs are **disabled** in Snyk project settings.

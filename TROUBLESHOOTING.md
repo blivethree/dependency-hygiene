@@ -169,3 +169,30 @@ repo deliberately carries no history.
 `TOO_NEW` is advisory unless `--strict`. A CI job green on 0.1.x can go red after the
 upgrade — that is intended. To stage the rollout, pin the tooling repo by SHA; the
 report header prints `depcheck vX.Y.Z`.
+
+## `APPROVED no` on a dep that was fine yesterday
+
+The approval gate is only active when a list is supplied (`--approved=<path>` or
+`.deps-policy.json → approved`). When it is, **any direct dep missing from the list
+blocks**, including one that was already there before the list existed.
+
+To bootstrap without hand-writing the file:
+
+```bash
+node scripts/depcheck.mjs . --approved=approved.json --seed-approved
+```
+
+Then fill in `rationale`/`approvedBy` and commit. Do not run `--seed-approved` in CI:
+a list that regenerates itself is a lockfile, not an approval record. Entries for
+packages you no longer use show up as `stale` — prune them, don't ignore the line.
+
+A version-pinned entry (`"version": "1.2.3"`) intentionally stops covering a bump:
+that is a prompt for a fresh look, not a bug.
+
+## `NO_HASH` after adopting hashes
+
+`NO_HASH` means the file requires hashes (`--require-hashes`) or you passed
+`--verify-integrity`, and a pin has none. Restore them from the source of truth —
+`pip download --require-hashes`, `uv lock`, `poetry lock` — and re-run. Removing the
+`--require-hashes` line to get CI green deletes the only control that notices a
+published artifact changing under an approved version.

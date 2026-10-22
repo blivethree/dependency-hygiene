@@ -48,6 +48,26 @@ merely `OUTDATED` — with no signal that it was malware.
 - **Breaking:** the exit-code contract changed (new blocking statuses). Hence the
   `0.1.0` → `0.2.0` bump; the version is printed in the report header.
 
+## Phase 5 — approved direct deps + integrity (DONE, v0.3.0)
+
+A denylist is retrospective and a cooldown only delays adoption; neither answers
+"should this library be in our tree" or "are these the bytes we reviewed".
+
+- `policy/example.approved.json` — approved **direct** dependencies with
+  `rationale`/`approvedBy`/`date`/`reviewBy`. Gate is opt-in (`--approved=<path>`
+  or `.deps-policy.json → approved`) so existing CI does not go red on upgrade.
+- Approval is an orthogonal `APPROVED` column, not a status: an unapproved direct
+  dep blocks whatever its freshness state. Transitive deps are not name-gated —
+  a 500-entry allowlist is script-seeded and rubber-stamped.
+- `--seed-approved` bootstraps the list from the current direct set (one-off,
+  local); `depcheck` reports approved-but-unused entries and overdue reviews.
+- `NO_HASH` — hashes are required (`--require-hashes` or `--verify-integrity`) but
+  missing. Hash extraction added for requirements `--hash=`, `Pipfile.lock`
+  `hashes`, `poetry.lock`/`uv.lock` `files[].hash`, `package-lock.json` `integrity`.
+- Deliberately **not** done: rejecting "older" versions (age is already handled, and
+  old ≠ unsafe), and full-tree approval (use Dependency-Track/SBOM tooling).
+- `npm test` — 40 tests, still stdlib only and offline.
+
 ## Why a repo (not a single script)
 
 So every machine you code on gets the *same* version: `git pull` and you're

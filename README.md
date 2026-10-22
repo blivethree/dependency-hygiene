@@ -70,9 +70,34 @@ Exit codes: 0 clean, 1 violation, 2 could not run.
 | `--policy=<path>` | Per-repo policy (also auto-read from `<repo>/.deps-policy.json`). |
 | `--compromised=<path>` | Extra denylist entries on top of `policy/compromised.json`. |
 | `--baseline=<rev>`, `--no-baseline` | Git revision used to detect *newly introduced* pins (default `HEAD`). |
+| `--approved=<path>` | Turn on the direct-dependency approval gate (also `.deps-policy.json → approved`). |
+| `--seed-approved` | Bootstrap the approved list from the current direct deps (needs `--approved`). |
+| `--verify-integrity` | Require hashes/integrity for every pin (`NO_HASH` otherwise). `--require-hashes` in a requirements file does this automatically. |
 
 Env overrides for the registry endpoints (private mirrors, offline tests):
 `DEPCHECK_PYPI_INDEX`, `DEPCHECK_NPM_REGISTRY`.
+
+### Approving dependencies (opt-in)
+
+A name list only answers *"should this library be in our tree"*. It does **not**
+stop a takeover of an approved package — `litellm` was on everyone's list — so pair
+it with hashes (or provenance) for that layer.
+
+```bash
+# one-off bootstrap, then fill in rationale/approvedBy and commit the file
+node $DHH/scripts/depcheck.mjs . --approved=approved.json --seed-approved
+node $DHH/scripts/depcheck.mjs . --approved=approved.json
+```
+
+| Field | Meaning |
+|---|---|
+| `ecosystem`, `name` | What is approved (case/`-_.` normalised). |
+| `version` / `versions` | Optional: restrict approval to exact versions, so a bump needs a fresh decision. |
+| `rationale`, `approvedBy`, `date`, `reviewBy` | The review record. Stale entries and overdue reviews are reported (advisory). |
+
+The gate is **off** unless a list is supplied. Only **direct** deps are name-gated:
+a 500-entry transitive allowlist gets script-seeded and rubber-stamped. See
+`policy/example.approved.json`.
 
 ### `depcheck` statuses
 
@@ -82,16 +107,21 @@ Env overrides for the registry endpoints (private mirrors, offline tests):
 | `OUTDATED` | direct | Bump to the suggested cooldown-safe target. |
 | `TOO_NEW` | `--strict` | Pin is younger than the cooldown but already committed — advisory. |
 | `UNAGED_NEW_DEP` | yes | A **newly introduced** pin younger than the cooldown. Revert or wait (`revisitAfter`). |
+| `NO_HASH` | direct | Hashes are required but this pin has none — the bytes are unverifiable. |
 | `UNPINNED` / `PRERELEASE` / `UNRESOLVING` | direct | Not an exact pin / pre-release / registry lookup failed. |
 | `WITHDRAWN` | **always** | Pinned version deleted from the registry. |
 | `YANKED` | **always** | Release withdrawn by the maintainer. |
 | `COMPROMISED` | **always** | Release listed in `policy/compromised.json` as malware. Incident, not a bump. |
+
+An unapproved direct dep shows `no` in the `APPROVED` column and blocks, whatever
+its freshness status. A transitive dep shows `—` (not name-gated).
 
 ## Policy
 
 - `references/policy.md` — rules, allowlist, exceptions, compromised-release rule.
 - `references/runbook.md` — how to act on Snyk findings / fix PRs / a compromised release.
 - `policy/compromised.json` — known-bad releases; never adoptable, no override.
+- `policy/example.approved.json` — approved direct dependencies (opt-in gate).
 - `policy/example.deps-policy.json` — template per-repo policy. Copy to your
   repo and edit the allowed base images / cooldown.
 
