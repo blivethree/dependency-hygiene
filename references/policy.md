@@ -16,6 +16,18 @@
 4. **No EOL distros.** `alpine:3.19`, `buster`, etc. are barred.
 5. **Allowed families:** `debian`, `alpine`. `ubuntu`/`rpm` need approval.
 6. **Age gate — dependencies:** don't adopt a new package whose latest release is < 14 days old. Bump existing pins only to the newest release that is ≥ 14 days old.
+7. **Known-compromised releases are never adoptable.** `policy/compromised.json` lists
+   releases withdrawn for malware or a supply-chain compromise. `depcheck` reports them
+   as `COMPROMISED` and always fails — for direct *and* transitive deps, in every
+   ecosystem, with or without `--strict`.
+   - No cooldown exception applies. A CVE fix does **not** license adopting a
+     compromised release; there is no safe version of it to run.
+   - `WITHDRAWN` (pinned version deleted from the registry) and `YANKED` (release
+     yanked by the maintainer) also block. Both are treated as "stop, investigate",
+     not "bump and move on".
+   - If a compromised release is found pinned, treat it as a **security incident**
+     (see `references/runbook.md`), not a dependency bump. The pin is the symptom;
+     credential exposure is the finding.
 
 ### Exception — security fixes may skip the cooldown
 
@@ -24,6 +36,9 @@ A CVE fix overrides the age gate **if**:
 - the version is pinned (no floating), and
 - it's recorded in `.deps-policy.json → cooldownOverride` with reason + review date, and
 - it's reviewed by the 14-day mark (or removed).
+
+A `cooldownOverride` cannot whitelist a `COMPROMISED`, `WITHDRAWN` or `YANKED` release —
+those statuses are checked before the override is consulted.
 
 ### Pinned versions
 - Python: exact pins (`fastapi==0.141.1`). No ranges in committed `requirements.txt`.
@@ -42,8 +57,9 @@ there (or keep it in-repo and point CI at it).
 
 ## Tooling
 
-- `scripts/depcheck.mjs` — dependency freshness + cooldown.
+- `scripts/depcheck.mjs` — dependency freshness + cooldown + compromised-release denylist.
 - `scripts/imgcheck.mjs` — base-image policy + drift detection.
+- `policy/compromised.json` — known-bad releases (never adoptable).
 - `policy/example.deps-policy.json` — template per-repo policy.
 - `references/runbook.md` — how to act on findings.
 - Global `AGENTS.md` at `~/.config/opencode/AGENTS.md` loads the `dependency-hygiene` skill automatically.

@@ -5,7 +5,8 @@ and what still needs to be done, so the work is reviewable branch by branch.
 
 ## Phase 1 — tooling as its own repo (DONE)
 
-- `scripts/depcheck.mjs` — freshness + 14-day age gate (PyPI + npm), `--json`, exit codes.
+- `scripts/depcheck.mjs` — freshness + 14-day age gate (PyPI + npm), compromised-release
+  denylist, `--json`, exit codes.
 - `scripts/imgcheck.mjs` — base-image policy: reject `-rc`/OS-swap/EOL/floating tags + drift.
 - `policy/example.deps-policy.json` — template per-repo policy (cooldown, allowlist, overrides).
 - `references/policy.md`, `references/runbook.md` — rules + how-to-act-on-findings.
@@ -25,6 +26,27 @@ and what still needs to be done, so the work is reviewable branch by branch.
 - `.github/workflows/deps.yml` in each app repo: clones this repo, runs
   `imgcheck --fail` + `depcheck`, plus `snyk test --severity-threshold=high`.
 - Pre-commit hook (local) running the same.
+
+## Phase 4 — supply-chain gate (DONE, v0.2.0)
+
+Triggered by the litellm PyPI compromise (`1.82.7`, `1.82.8` in Mar 2026; `1.107.0`
+in Oct 2026). The old gate structurally could not see this class of attack: a fresh
+release was advisory (`TOO_NEW` → exit 0), and a deleted release was reported as
+merely `OUTDATED` — with no signal that it was malware.
+
+- `policy/compromised.json` — denylist of known-bad releases, seeded with litellm.
+- New statuses: `COMPROMISED`, `WITHDRAWN`, `YANKED` (always block, any ecosystem,
+  any scope); `UNAGED_NEW_DEP` (a *newly introduced* pin younger than the cooldown
+  blocks); `TOO_NEW` stays advisory but now carries `revisitAfter`.
+- `--baseline=<rev>` git diff distinguishes a new adoption from an already-committed
+  pin. `--strict` escalates transitive findings and fresh pins.
+- `safeTarget` never proposes a known-bad/yanked/withdrawn release; `--fix` refuses
+  any file holding one.
+- Coverage extended to `pyproject.toml`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, so
+  transitive Python deps (how `litellm` usually arrives) are visible.
+- `npm test` — 26 tests, stdlib only, offline via a local stub registry.
+- **Breaking:** the exit-code contract changed (new blocking statuses). Hence the
+  `0.1.0` → `0.2.0` bump; the version is printed in the report header.
 
 ## Why a repo (not a single script)
 

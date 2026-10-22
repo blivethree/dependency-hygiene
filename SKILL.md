@@ -23,6 +23,8 @@ You are a careful gatekeeper for dependencies and base images. Apply this
 - Accepting a Snyk/Dependabot fix PR.
 - Changing a `FROM` line.
 - Reviewing a base-image CVE.
+- Reading a supply-chain advisory (a package version compromised on PyPI/npm, a
+  withdrawn/yanked release), or seeing a `COMPROMISED` row in `depcheck`.
 
 ## Workflow
 
@@ -33,11 +35,17 @@ You are a careful gatekeeper for dependencies and base images. Apply this
 2. **For a dependency adoption/upgrade:**
    - Run `node ~/.agents/skills/dependency-hygiene/scripts/depcheck.mjs` from
      the repo root.
-   - Read the status column: `OK`, `OUTDATED`, `TOO_NEW`, `UNPINNED`,
-     `PRERELEASE`, `UNRESOLVING`.
-   - **Reject** `TOO_NEW` (< 14 days) and `PRERELEASE` unless there is a
-     documented security override in `.deps-policy.json`.
-   - **Bump** `OUTDATED` to the cooldown-safe target the tool suggests.
+   - Read the status column: `OK`, `OUTDATED`, `TOO_NEW`, `UNAGED_NEW_DEP`,
+     `UNPINNED`, `PRERELEASE`, `UNRESOLVING`, `WITHDRAWN`, `YANKED`,
+     `COMPROMISED`.
+   - **Stop** on `COMPROMISED`, `WITHDRAWN` or `YANKED` — that is a security
+     incident (`references/runbook.md` §A2), not a version bump. Do not "fix"
+     it by moving the pin.
+   - **Reject** `UNAGED_NEW_DEP` (a new pin younger than 14 days) and
+     `PRERELEASE` unless there is a documented override in `.deps-policy.json`.
+     `TOO_NEW` (already pinned, merely young) is advisory — wait, don't churn.
+   - **Bump** `OUTDATED` to the cooldown-safe target the tool suggests. The
+     suggestion already excludes known-bad, yanked and withdrawn releases.
 
 3. **For a base-image change / Snyk fix PR:**
    - The default Snyk base-image suggestion is frequently wrong — it often
@@ -51,7 +59,8 @@ You are a careful gatekeeper for dependencies and base images. Apply this
 
 4. **For a Python `requirements.txt`:**
    - Use exact pins (`pkg==1.2.3`). The `depcheck --fix` flag rewrites pins
-     to cooldown-safe versions.
+     to cooldown-safe versions, and **refuses** any file containing a
+     `COMPROMISED`/`WITHDRAWN`/`YANKED` row.
    - After changes, re-run `depcheck` until all green, then
      `pip install -r requirements.txt` and test.
 
@@ -86,9 +95,11 @@ Review quarterly; remove older than the cooldown.
 
 ## References (read these when this skill loads)
 
-- `references/runbook.md` — how to act on findings, stale-vs-real decision.
-- `references/policy.md` — allowlist, cooldown, exceptions.
-- `scripts/depcheck.mjs` — dependency freshness + cooldown.
+- `references/runbook.md` — how to act on findings, stale-vs-real decision,
+  compromised-release incident response (§A2).
+- `references/policy.md` — allowlist, cooldown, exceptions, denylist rule.
+- `policy/compromised.json` — known-bad releases (never adoptable).
+- `scripts/depcheck.mjs` — dependency freshness + cooldown + denylist.
 - `scripts/imgcheck.mjs` — base-image policy + drift detection.
 
 Run the scripts; don't rely on memory alone.

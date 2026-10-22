@@ -140,3 +140,32 @@ curl -s -L -H "Authorization: token $(gh auth token)" \
   "https://api.github.com/repos/<your-org>/<your-repo>/actions/runs/<ID>/jobs" \
   | strings | grep -iE "error|fail|clone|fatal"
 ```
+## `depcheck` says `OUTDATED` for a version that no longer exists
+
+Symptom: a repo pins a release that has since been **deleted** from the registry (e.g.
+`litellm==1.82.8` after the Mar 2026 compromise). `depcheck` ≤ 0.1.x found no age for
+the pin, fell through to `OUTDATED → bump to X`, and the result looked like routine
+staleness — with no signal that the release was malware.
+
+Since 0.2.0 that case is `WITHDRAWN` and blocks; a denylisted release is `COMPROMISED`.
+If you see the old wording, you're running a stale copy — `git pull` the tooling repo.
+(CI clones it fresh each run, so this is usually a local or pre-commit copy.)
+
+## `UNAGED_NEW_DEP` on CI but not locally
+
+`depcheck` uses `git show HEAD:<manifest>` to tell a newly introduced pin from one that
+was already committed. A manifest created in the same commit has no baseline entry,
+which is correct: a genuinely new dependency is flagged even when it was added in an
+earlier commit of the same push.
+
+If the manifest is **untracked**, or the repo has no commits, the baseline is
+unavailable and fresh pins stay `TOO_NEW` with "adoption age unverified". Options:
+`--baseline=<sha>`, `actions/checkout` with `fetch-depth: 0`, or `--no-baseline` if the
+repo deliberately carries no history.
+
+## Exit-code contract changed in 0.2.0
+
+`COMPROMISED`, `WITHDRAWN`, `YANKED` and `UNAGED_NEW_DEP` are new blocking statuses;
+`TOO_NEW` is advisory unless `--strict`. A CI job green on 0.1.x can go red after the
+upgrade — that is intended. To stage the rollout, pin the tooling repo by SHA; the
+report header prints `depcheck vX.Y.Z`.
