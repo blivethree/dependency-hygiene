@@ -1,5 +1,5 @@
 {
-  "$comment": "Example per-repo policy. Copy this to <your-repo>/.deps-policy.json and edit.",
+  "$comment": "Example per-repo policy. Copy this to <your-repo>/.deps-policy.json and edit. Known-bad releases live in policy/compromised.json (shared); the optional 'compromised' array below adds repo-local entries with the same shape.",
   "cooldownDays": 14,
   "securityException": true,
   "allowedBaseFamilies": ["debian", "alpine"],
@@ -18,5 +18,6 @@
       "date": "2026-10-21",
       "reviewBy": "2026-11-21"
     }
-  }
+  },
+  "compromised": []
 }
