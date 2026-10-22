@@ -28,6 +28,53 @@
    - If a compromised release is found pinned, treat it as a **security incident**
      (see `references/runbook.md`), not a dependency bump. The pin is the symptom;
      credential exposure is the finding.
+8. **New direct dependencies need review before the PR can merge (opt-in).**
+   When a repo supplies an approved list (`--approved=<path>` or
+   `.deps-policy.json → approved`), `depcheck` gates direct dependencies. The gate
+   is off when no list is supplied, so adopting it is a deliberate, per-repo
+   decision.
+   - **`--approval-scope=new` (default) gates only a direct dep *name* that is new
+     relative to the git baseline.** The pre-existing tree is grandfathered, so
+     enabling the gate does not block unrelated work. If no usable baseline exists,
+     it fails closed (everything is treated as new).
+   - `--approval-scope=all` gates every direct dep; use it for the periodic audit
+     and for deploys, not on every PR.
+   - **A developer may draft an entry, but it is only an approval once `approvedBy`
+     and `date` are filled.** Blank fields keep the build red — that is the pending
+     state. Under `--strict`/`--frozen`, `rationale` and `reviewBy` are required too.
+   - `approved.json` is owned by security via `CODEOWNERS`; branch protection with
+     the `depcheck` check required is the actual control. The reviewed diff is the
+     sign-off, and the merge commit is the audit record.
+   - Name-level approval by default. Add `version`/`versions` when a bump must
+     require a fresh human decision.
+   - Bootstrap once, locally, with `--seed-approved` (entries are flagged
+     `grandfathered`). **Never seed in CI:** a list that regenerates itself is a
+     lockfile, not an approval record. Replace every grandfathered rationale.
+   - **Transitive deps are not name-gated.** A 500-entry allowlist is seeded by a
+     script and then rubber-stamped; that is false assurance, not a gate. Use the
+     SBOM/Dependency-Track for reach.
+   - Revoke by removing the entry (or letting a version-pinned approval stop
+     matching); the next PR and deploy fail.
+   - Approval is a review record, not a security control by itself: `litellm` was on
+     everyone's approved list when it was taken over. Names answer *"should this be
+     in our tree"*; hashes and provenance answer *"are these the bytes we
+     reviewed"*. Full process: `references/approval-workflow.md`.
+9. **Hashes or it didn't happen.** If a `requirements.txt` uses `--require-hashes`,
+   every pin must carry at least one `--hash=` (`NO_HASH`, blocking). Lockfiles
+   (`poetry.lock`, `uv.lock`, `Pipfile.lock`, `package-lock.json`) already record
+   hashes/integrity — `--verify-integrity` checks any manifest for them.
+   - This is the only layer that survives a compromised registry account: a name and
+     version can be approved while the published artifact changes underneath it.
+10. **Deploys verify the approved tree, not a fresh build.** The deploy job runs
+    `depcheck --frozen --verify-integrity` against the exact commit/tag being
+    shipped. `--frozen` refuses to run without an approved list (exit `2`), forces
+    `scope=all` + `--strict`, and exits `2` on an empty scan rather than passing a
+    gate on nothing.
+    - Overdue `reviewBy` dates stay advisory even in `--frozen`: a lapsed review is
+      a ticket, not an outage. Incomplete records (`approvedBy`/`date`, and
+      `rationale`/`reviewBy` under strict) do block.
+    - Ship the artifact by **digest** and keep its SBOM with it; do not rebuild per
+      environment and assume the bytes match what the gate saw.
 
 ### Exception — security fixes may skip the cooldown
 
@@ -60,7 +107,10 @@ there (or keep it in-repo and point CI at it).
 - `scripts/depcheck.mjs` — dependency freshness + cooldown + compromised-release denylist.
 - `scripts/imgcheck.mjs` — base-image policy + drift detection.
 - `policy/compromised.json` — known-bad releases (never adoptable).
+- `policy/example.approved.json` — approved direct dependencies (opt-in gate).
 - `policy/example.deps-policy.json` — template per-repo policy.
+- `references/approval-workflow.md` — request → review → approve → deploy → audit.
+- `examples/deps.yml`, `examples/CODEOWNERS` — CI gate + security ownership template.
 - `references/runbook.md` — how to act on findings.
 - Global `AGENTS.md` at `~/.config/opencode/AGENTS.md` loads the `dependency-hygiene` skill automatically.
 
@@ -70,4 +120,10 @@ there (or keep it in-repo and point CI at it).
 
 - Base-image changes, base-image *fixes*, and any `-rc`/OS-family move → **human review required**.
 - Dependency bumps within policy → `depcheck`/`imgcheck` green in CI is approval to merge.
+- **A new direct dependency → security review of `approved.json` before merge** (the
+  file is `CODEOWNERS`-owned; the developer drafts the entry, security signs it).
+  The merge commit carries the dependency, the justification, and the approver.
+- **Revoking an approval → remove/expire the entry.** The next PR and deploy fail;
+  that is the intended path.
 - Security exception overrides → quarterly review; entries expire.
+- Full workflow: `references/approval-workflow.md`.

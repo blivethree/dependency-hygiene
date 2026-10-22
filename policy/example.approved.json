@@ -1,0 +1,48 @@
+{
+  "$comment": "Approved DIRECT dependencies. Activate with --approved=<this file> or by copying the 'approved' array into <repo>/.deps-policy.json. Scope: --approval-scope=new (default) gates only direct dep names new vs the git baseline; 'all' gates the whole tree (audit/deploy). approvedBy + date are the sign-off; blank = a pending request (still blocking). rationale + reviewBy are required under --strict/--frozen. Name-level by default; add \"version\"/\"versions\" to require a fresh approval on bump. Bootstrap once locally with --seed-approved (never in CI); seeded entries carry grandfathered:true and need a real review. Full process: references/approval-workflow.md.",
+  "updated": "2026-10-22",
+  "entries": [
+    {
+      "ecosystem": "pypi",
+      "name": "fastapi",
+      "rationale": "HTTP framework for the public API; already reviewed at intro. MIT licence.",
+      "approvedBy": "security-team",
+      "date": "2026-10-22",
+      "reviewBy": "2027-01-20",
+      "ticket": "SEC-1234",
+      "checks": {
+        "versionAgeDays": 210,
+        "releases": 180,
+        "license": "MIT",
+        "knownBad": false
+      }
+    },
+    {
+      "ecosystem": "npm",
+      "name": "zod",
+      "rationale": "Runtime schema validation; replaces hand-written guards.",
+      "approvedBy": "security-team",
+      "date": "2026-10-22",
+      "reviewBy": "2027-01-20",
+      "checks": {
+        "releases": 90,
+        "license": "MIT",
+        "knownBad": false
+      }
+    },
+    {
+      "ecosystem": "pypi",
+      "name": "litellm",
+      "versions": ["1.106.2"],
+      "rationale": "Pinned to the last release before the Oct 2026 takeover. Never adopt 1.82.7/1.82.8/1.107.0 (see policy/compromised.json). Version-pinned so a bump comes back for a fresh decision.",
+      "approvedBy": "security",
+      "date": "2026-10-22",
+      "reviewBy": "2026-11-05",
+      "ticket": "SEC-4711",
+      "checks": {
+        "license": "MIT",
+        "knownBad": false
+      }
+    }
+  ]
+}

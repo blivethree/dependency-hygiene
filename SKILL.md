@@ -46,6 +46,19 @@ You are a careful gatekeeper for dependencies and base images. Apply this
      `TOO_NEW` (already pinned, merely young) is advisory — wait, don't churn.
    - **Bump** `OUTDATED` to the cooldown-safe target the tool suggests. The
      suggestion already excludes known-bad, yanked and withdrawn releases.
+   - If the repo has an approved list (`--approved=` or `.deps-policy.json →
+     approved`), a new **direct** dep needs a review record before the PR can
+     merge. Get the paste-ready entry with `--print-approval-request`, paste it
+     in, and leave `approvedBy`/`date` blank — that is the request. Security
+     fills the sign-off after checking the evidence. Never fill `approvedBy`
+     yourself to get green: a self-approved entry is not an audit trail.
+     Transitive deps are not name-gated.
+   - `--frozen` is the deploy gate (requires the list, scope=all, strict). Do not
+     weaken it to unblock a deploy, and never run `--seed-approved` in CI.
+   - A `NO_HASH` row means hashes are required (`--require-hashes` /
+     `--verify-integrity`) but missing: restore them from the lockfile or the
+     index (`pip download --require-hashes` / `uv lock`), never by deleting the
+     `--require-hashes` line to get green.
 
 3. **For a base-image change / Snyk fix PR:**
    - The default Snyk base-image suggestion is frequently wrong — it often
@@ -61,6 +74,8 @@ You are a careful gatekeeper for dependencies and base images. Apply this
    - Use exact pins (`pkg==1.2.3`). The `depcheck --fix` flag rewrites pins
      to cooldown-safe versions, and **refuses** any file containing a
      `COMPROMISED`/`WITHDRAWN`/`YANKED` row.
+   - Prefer `--require-hashes` (with `--hash=` per pin): it is the only layer
+     that fails when a *published artifact* changes under an approved version.
    - After changes, re-run `depcheck` until all green, then
      `pip install -r requirements.txt` and test.
 
@@ -96,9 +111,12 @@ Review quarterly; remove older than the cooldown.
 ## References (read these when this skill loads)
 
 - `references/runbook.md` — how to act on findings, stale-vs-real decision,
-  compromised-release incident response (§A2).
+  compromised-release incident response (§A2), new-dependency requests (§E).
 - `references/policy.md` — allowlist, cooldown, exceptions, denylist rule.
+- `references/approval-workflow.md` — request → review → approve → deploy → audit.
 - `policy/compromised.json` — known-bad releases (never adoptable).
+- `policy/example.approved.json` — approved direct dependencies (opt-in gate).
+- `examples/deps.yml`, `examples/CODEOWNERS` — CI gate + security ownership template.
 - `scripts/depcheck.mjs` — dependency freshness + cooldown + denylist.
 - `scripts/imgcheck.mjs` — base-image policy + drift detection.
 

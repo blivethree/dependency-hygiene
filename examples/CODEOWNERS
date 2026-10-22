@@ -1,0 +1,12 @@
+# Copy to .github/CODEOWNERS (or CODEOWNERS at the repo root) and replace the
+# team slug. Branch protection must "require review from code owners"; without
+# that, this file is only a notification.
+#
+# The approval record is security-owned: a developer may draft an entry with
+# blank approvedBy/date, but only a security reviewer fills the sign-off. The
+# reviewed diff is the audit evidence.
+
+/approved.json                  @your-org/security
+/.deps-policy.json              @your-org/security
+/.github/workflows/deps.yml     @your-org/security
+/policy/compromised.json        @your-org/security
