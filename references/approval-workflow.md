@@ -162,6 +162,11 @@ node scripts/depcheck.mjs . --approved=approved.json --approval-scope=all --json
   | jq '.approvalGate, .rows[] | select(.direct=="direct") | {name,current,approved,approvalIssue}'
 ```
 
+Each direct row also carries `approvalBasis`, which explains *why* it was gated:
+`new` (name added in this change), `legacy` (pre-existing and out of scope under
+`scope=new`), `pinned` (a version-pinned approval no longer matches), `all`
+(`scope=all`), or `no-baseline` (could not compare, so it was treated as new).
+
 - `reviewBy` ≈ 90 days. Overdue reviews are **advisory** (they do not break a
   deploy) so a lapsed review cannot take production down; they show up in the
   report and should become a ticket.

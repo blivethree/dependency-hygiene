@@ -73,7 +73,7 @@ Exit codes: 0 clean, 1 violation, 2 could not run.
 | `--baseline=<rev>`, `--no-baseline` | Git revision used to detect *newly introduced* pins (default `HEAD`; `origin/$GITHUB_BASE_REF` on GitHub PRs, so a checked-out merge commit does not hide the change). |
 | `--approved=<path>` | Turn on the direct-dependency approval gate (also `.deps-policy.json → approved`). |
 | `--approval-scope=new\|all` | What the approval gate covers: `new` (default) gates only direct dep names that are new vs the git baseline; `all` gates the whole direct tree. |
-| `--print-approval-request` | Print paste-ready approval entries (blank sign-off + registry evidence) for unapproved direct deps. |
+| `--print-approval-request` | Print paste-ready approval entries (blank sign-off + registry evidence) for unapproved direct deps. Requires the gate on (exit 2 otherwise); `--json` takes precedence if both are passed. |
 | `--seed-approved` | One-off local bootstrap of the approved list from the current direct deps (needs `--approved`). Never run in CI. |
 | `--frozen` | Deploy gate: requires an approved list, forces `--approval-scope=all` + `--strict`, and exits 2 rather than pass on an empty scan. |
 | `--verify-integrity` | Require hashes/integrity for every pin (`NO_HASH` otherwise). `--require-hashes` in a requirements file does this automatically. |
