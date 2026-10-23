@@ -1,7 +1,7 @@
 # dependency-hygiene
 
-Small, **dependency-free** (stdlib Node 20+ only) tooling that gates two kinds of
-change across your repos:
+Small, **dependency-free** (stdlib Node 20+ only) tooling that gates three kinds
+of change across your repos:
 
 - **`scripts/depcheck.mjs`** — dependency freshness + 14-day age gate + known-bad
   release denylist + opt-in approval gate for new direct dependencies. Scans
@@ -9,6 +9,10 @@ change across your repos:
   `uv.lock` and Node `package-lock.json`.
 - **`scripts/imgcheck.mjs`** — base-image policy + drift detection
   (no `-rc`, no OS-family swap, no floating tags, pinned Debian codename/digest).
+- **`scripts/ghacheck.mjs`** — GitHub Actions pin policy: every `uses:` must be a
+  full commit SHA, and a pin behind the newest release by a **major** version
+  blocks (a SHA pin is excluded from security fixes backported to the floating
+  tag, so `# v4.4.0` quietly misses hardening that `@v4` users receive).
 
 **Why this exists:** Snyk finds *known CVEs*, but it can't age-gate new
 libraries, it won't tell you a release was **compromised or withdrawn**, and it
@@ -82,6 +86,43 @@ Exit codes: 0 clean, 1 violation, 2 could not run.
 
 Env overrides for the registry endpoints (private mirrors, offline tests):
 `DEPCHECK_PYPI_INDEX`, `DEPCHECK_NPM_REGISTRY`.
+
+### `ghacheck` — GitHub Actions pins
+
+`depcheck` reads package manifests and `imgcheck` reads Dockerfiles, so `uses:`
+pins in `.github/workflows/*.yml` were **invisible to both**. That gap is real:
+a SHA-pinned action does **not** receive security hardening backported to the
+floating major tag, so `actions/checkout@<sha> # v4.4.0` silently misses fixes
+that `@v4` users got automatically. `ghacheck` closes it.
+
+```bash
+node $DHH/scripts/ghacheck.mjs . --fail          # gate (resolves latest releases)
+node $DHH/scripts/ghacheck.mjs . --resolve       # report only, never blocks
+node $DHH/scripts/ghacheck.mjs . --fail --json   # machine-readable
+```
+
+| Flag | Effect |
+|---|---|
+| `--fail` | Exit 1 on violations. Also turns on resolution — an offline run cannot prove a pin is current, so it must not gate on a guess. |
+| `--resolve` | Query GitHub for the latest release; advisory only (exit 0). |
+| `--cooldown=<days>` | Flag `TOO_NEW` when the latest release is younger (default 14, matching `depcheck`). |
+| `--api=<url>` | Override the GitHub API base (mirrors/tests). Env: `GHACHECK_API`. |
+
+Set `GITHUB_TOKEN` in CI to lift the 60 req/hr anonymous rate limit.
+
+Rule set:
+
+- A `uses:` that is not a full 40-char SHA is `UNSAFE_REF` and **blocks**: a tag
+  or branch can be re-pointed at malicious code after review. A floating `@vN`
+  ref also reports how far behind it is, so you pin the *current* major's SHA
+  rather than re-pinning an ancient one.
+- A SHA pin behind the newest release by ≥ 1 **major** version is
+  `OUTDATED_MAJOR` and **blocks** — major releases are where security hardening
+  lands. Minor/patch drift is `OUTDATED_MINOR` (advisory).
+- A pin with no `# vX.Y.Z` comment is `UNCOMMENTED_PIN` (advisory) — a bare SHA
+  is unreviewable.
+- The same action pinned at different majors warns `PIN_DRIFT`.
+- Local (`./action`) and `docker://` refs are ignored.
 
 ### Approving dependencies (opt-in)
 
@@ -187,9 +228,9 @@ summary, frozen deploy job) is `examples/deps.yml`; ownership for
 `approved.json` is `examples/CODEOWNERS`.
 
 ```yaml
-- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
   with: { fetch-depth: 0 }   # scope=new needs the baseline
-- uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+- uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
   with: { node-version: 24 }
 - run: git clone --branch v0.4.0 --depth 1 https://github.com/<your-org>/dependency-hygiene.git $HOME/dependency-hygiene
 - run: node $HOME/dependency-hygiene/scripts/imgcheck.mjs . \

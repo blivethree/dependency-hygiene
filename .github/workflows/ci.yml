@@ -38,5 +38,10 @@ jobs:
         run: |
           node -e "for (const f of ['policy/compromised.json','policy/example.approved.json','policy/example.deps-policy.json']) { JSON.parse(require('node:fs').readFileSync(f, 'utf8')); console.log('ok', f); }"
 
+      - name: GitHub Actions pin policy
+        run: node scripts/ghacheck.mjs . --fail
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Tests
         run: TMPDIR="$RUNNER_TEMP" node --test tests/*.test.mjs
