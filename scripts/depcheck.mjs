@@ -4,9 +4,10 @@
 // + Node package-lock.json / package.json. Stdlib Node 20+ only (no installs).
 //
 //   node scripts/depcheck.mjs [paths...] [--cooldown=14] [--json] [--strict] [--fix]
-//        [--policy=path] [--compromised=path] [--baseline=rev] [--no-baseline]
-//        [--approved=path] [--seed-approved] [--verify-integrity]
-//        [--approval-scope=new|all] [--print-approval-request] [--frozen]
+//        [--suggest [--suggest-file=path]] [--policy=path] [--compromised=path]
+//        [--baseline=rev] [--no-baseline] [--approved=path] [--seed-approved]
+//        [--verify-integrity] [--approval-scope=new|all] [--print-approval-request]
+//        [--frozen]
 //
 //   - COMPROMISED / WITHDRAWN / YANKED always block: any ecosystem, any scope.
 //   - UNAGED_NEW_DEP blocks a *newly introduced* pin younger than the cooldown
@@ -43,7 +44,7 @@ const TOOL_ROOT = resolve(SCRIPT_DIR, "..");
 
 // ── args ──
 // Flags that take a value; the value must not be mistaken for a scan directory.
-const VALUE_FLAGS = new Set(["policy", "cooldown", "compromised", "baseline", "approved", "approval-scope"]);
+const VALUE_FLAGS = new Set(["policy", "cooldown", "compromised", "baseline", "approved", "approval-scope", "suggest-file"]);
 const rawArgs = argv.slice(2);
 const flagValue = (name) => {
   const eq = rawArgs.find((a) => a.startsWith(`--${name}=`));
@@ -63,6 +64,8 @@ if (!SCAN_DIRS.length) SCAN_DIRS.push(cwd());
 
 const JSON_OUT = hasFlag("json");
 const FIX = hasFlag("fix");
+const SUGGEST = hasFlag("suggest");
+const SUGGEST_FILE = flagValue("suggest-file");
 const NO_BASELINE = hasFlag("no-baseline");
 const SEED_APPROVED = hasFlag("seed-approved");
 const VERIFY_INTEGRITY = hasFlag("verify-integrity");
@@ -328,12 +331,16 @@ export function classify(dep, reg) {
   if (!cur) return { status: "WITHDRAWN", note: `pinned ${dep.current} is no longer published (deleted/quarantined) — do not re-adopt` };
   if (cur.yanked) return { status: "YANKED", note: `release yanked${cur.yankedReason ? `: ${cur.yankedReason}` : ""}` };
 
-  // NEW: verify that the pinned release actually exists on PyPI and is installable
-  if (!cur.files || cur.files.length === 0) {
-    return { status: "MISSING_RELEASE", note: `release ${dep.current} has no installable files on PyPI` };
-  }
-  if (!installable(cur.files)) {
-    return { status: "MISSING_RELEASE", note: `release ${dep.current} is not installable in this image` };
+  // NEW: verify that the pinned release actually exists on PyPI and is installable.
+  // Only applies to PyPI — npm registry metadata doesn't expose file lists.
+  const eco = normEco(dep.ecosystem);
+  if (eco === "pypi") {
+    if (!cur.files || cur.files.length === 0) {
+      return { status: "MISSING_RELEASE", note: `release ${dep.current} has no installable files on PyPI` };
+    }
+    if (!installable(cur.files)) {
+      return { status: "MISSING_RELEASE", note: `release ${dep.current} is not installable in this image` };
+    }
   }
 
   const curAge = ageDays(cur.lastUpload);
@@ -605,6 +612,7 @@ function applyIntegrity(row, dep) {
 // --fix: rewrite exact `pkg==x` pins in requirements.txt to the cooldown-safe
 // target. Never touches a file holding a COMPROMISED/WITHDRAWN/YANKED pin, and
 // safeTarget() already excludes known-bad releases.
+// --suggest: write a unified diff to stdout (or a file) with suggested bumps.
 async function applyFixes(rows) {
   const byFile = new Map();
   for (const r of rows) {
@@ -631,6 +639,34 @@ async function applyFixes(rows) {
     if (touched) { await writeFile(file, out.join("\n")); changed++; }
   }
   return changed;
+}
+
+// --suggest: generate a unified diff of suggested version bumps.
+// Useful for PR comments or manual review — does NOT modify files.
+async function buildSuggestDiff(rows) {
+  const byFile = new Map();
+  for (const r of rows) {
+    if (r.status !== "OUTDATED" || !r.safeTarget || !r.file.endsWith("requirements.txt")) continue;
+    if (!byFile.has(r.file)) byFile.set(r.file, new Map());
+    byFile.get(r.file).set(normName(r.name), { from: String(r.current), to: String(r.safeTarget) });
+  }
+  const diffs = [];
+  for (const [file, targets] of byFile) {
+    const text = await readFile(file, "utf8");
+    const lines = text.split("\n");
+    const out = [];
+    for (const line of lines) {
+      const m = line.match(/^(\s*[A-Za-z0-9_.\-]+(?:\[[^\]]*\])?\s*==\s*)([^;#\s]+)(.*)$/);
+      if (!m) { out.push(line); continue; }
+      const name = normName(m[1].replace(/\[[^\]]*\]/g, "").replace(/==.*$/, "").trim());
+      const t = targets.get(name);
+      if (!t || m[2] !== t.from || t.from === t.to) { out.push(line); continue; }
+      out.push(`- ${line}`);
+      out.push(`+ ${m[1]}${t.to}${m[3]}`);
+    }
+    diffs.push(`--- a/${file}\n+++ b/${file}\n${out.join("\n")}`);
+  }
+  return diffs.join("\n\n");
 }
 
 // ── main ──
@@ -812,6 +848,18 @@ async function main() {
       ({ rows: out, skipped } = await scan());
       if (!JSON_OUT) stdout.write(`fix: rewrote ${n} file(s); re-scanned\n`);
     }
+  }
+
+  // --suggest: emit a unified diff of suggested bumps (does not modify files).
+  if (SUGGEST) {
+    const diff = await buildSuggestDiff(out);
+    if (SUGGEST_FILE) {
+      await writeFile(SUGGEST_FILE, diff + "\n");
+      stderr.write(`suggest: wrote ${SUGGEST_FILE}\n`);
+    } else {
+      stdout.write(diff + "\n");
+    }
+    exit(out.filter(isBlocking).length ? 1 : 0);
   }
 
   if (SEED_APPROVED) await seedApprovals(out);

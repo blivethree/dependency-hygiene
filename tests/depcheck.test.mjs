@@ -742,6 +742,33 @@ test("e2e: --verify-integrity flags a lockfile entry with no hash", async () => 
   } finally { await stub.close(); }
 });
 
+// ── --suggest: unified diff of recommended bumps ──
+test("e2e: --suggest emits a unified diff for outdated pins", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==0.5.0\n" });
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline", "--suggest"]);
+    // OUTDATED is blocking for direct deps, so exit code is 1
+    assert.equal(code, 1, stdout);
+    assert.match(stdout, /^--- a\/.*\/requirements\.txt$/m);
+    assert.match(stdout, /^\+ acme-lib==1\.0\.0$/m);
+    assert.match(stdout, /^- acme-lib==0\.5\.0$/m);
+  } finally { await stub.close(); }
+});
+
+test("e2e: --suggest-file writes the diff to a file", async () => {
+  const stub = await startRegistry(REGISTRY);
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==0.5.0\n" });
+    const file = join(dir, "suggested.patch");
+    const { code, stderr } = await runCLI(dir, stub.url, ["--no-baseline", "--suggest", `--suggest-file=${file}`]);
+    assert.equal(code, 1, stderr);
+    const content = await readFile(file, "utf8");
+    assert.match(content, /acme-lib==1\.0\.0/);
+    assert.match(content, /acme-lib==0\.5\.0/);
+  } finally { await stub.close(); }
+});
+
 // ── MISSING_RELEASE: pin that has no installable files on PyPI ──
 test("e2e: a pin to a version that is not on PyPI is blocked as WITHDRAWN", async () => {
   const stub = await startRegistry({
