@@ -13,3 +13,6 @@ depcheck-cache.*.json
 *.swp
 .idea/
 *.code-workspace
+
+# Local working notes
+PRIVATE-REPO-SETUP.md

@@ -228,6 +228,18 @@ function tidyLicense(l) {
   return t.length > 60 ? `${t.slice(0, 57)}…` : t;
 }
 
+// Helper: check if a PyPI release has files that can be installed in the
+// current container. We accept any wheel or source distribution; the
+// specific python version/platform matching is handled by pip at install
+// time, and we only need to verify that *some* installable artifact exists.
+function installable(files) {
+  return files.some(f =>
+    f.filename.endsWith(".whl") ||
+    f.filename.endsWith(".tar.gz") ||
+    f.filename.endsWith(".zip")
+  );
+}
+
 async function pypiReleases(name) {
   const d = await getJSON(`${PYPI_INDEX}/${encodeURIComponent(name)}/json`);
   if (!d) return null;
@@ -246,6 +258,7 @@ async function pypiReleases(name) {
       lastUpload: new Date(Math.max(...t)).toISOString(),
       yanked: files.every((f) => f.yanked === true),
       yankedReason: files.find((f) => f.yanked_reason)?.yanked_reason || null,
+      files,                     // keep raw file list for installability check
     });
   }
   rels.sort((a, b) => new Date(b.lastUpload) - new Date(a.lastUpload));
@@ -314,6 +327,14 @@ export function classify(dep, reg) {
   // Pinned but absent from the registry: deleted/quarantined (the litellm case).
   if (!cur) return { status: "WITHDRAWN", note: `pinned ${dep.current} is no longer published (deleted/quarantined) — do not re-adopt` };
   if (cur.yanked) return { status: "YANKED", note: `release yanked${cur.yankedReason ? `: ${cur.yankedReason}` : ""}` };
+
+  // NEW: verify that the pinned release actually exists on PyPI and is installable
+  if (!cur.files || cur.files.length === 0) {
+    return { status: "MISSING_RELEASE", note: `release ${dep.current} has no installable files on PyPI` };
+  }
+  if (!installable(cur.files)) {
+    return { status: "MISSING_RELEASE", note: `release ${dep.current} is not installable in this image` };
+  }
 
   const curAge = ageDays(cur.lastUpload);
   const newest = reg.rels[0];
@@ -552,12 +573,14 @@ async function findManifests() {
 }
 
 // ── gating ──
-const BLOCKING_ALWAYS = new Set(["COMPROMISED", "WITHDRAWN", "YANKED"]);
+const BLOCKING_ALWAYS = new Set(["COMPROMISED", "WITHDRAWN", "YANKED", "MISSING_RELEASE"]);
 const ADVISORY_ONLY = new Set(["TOO_NEW"]);
 // Report worst-first so a known-bad pin is never buried under a page of OK rows.
 const STATUS_ORDER = {
-  COMPROMISED: 0, WITHDRAWN: 1, YANKED: 2, UNAGED_NEW_DEP: 3, NO_HASH: 4,
-  OUTDATED: 5, UNPINNED: 6, PRERELEASE: 7, UNRESOLVING: 8, TOO_NEW: 9, OK: 10,
+  COMPROMISED: 0, WITHDRAWN: 1, YANKED: 2, MISSING_RELEASE: 3,
+  UNAGED_NEW_DEP: 4, NO_HASH: 5,
+  OUTDATED: 6, UNPINNED: 7, PRERELEASE: 8, UNRESOLVING: 9,
+  TOO_NEW: 10, OK: 11,
 };
 function isBlocking(r) {
   // Approval is orthogonal to freshness: an aged, safe pin can still be unvetted.
