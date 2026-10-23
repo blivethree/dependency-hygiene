@@ -19,7 +19,7 @@ const TMP_ROOT = process.env.TMPDIR || tmpdir();
 
 // ── fixtures ──
 const daysAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
-const rel = (v, days, extra = {}) => ({ v, lastUpload: daysAgo(days), ...extra });
+const rel = (v, days, extra = {}) => ({ v, lastUpload: daysAgo(days), files: [{ filename: `${v}-cp312-cp312-linux_x86_64.whl` }], ...extra });
 const reg = (...rels) => ({ latest: rels[0]?.v ?? null, rels });
 
 const tmpdirs = [];
@@ -42,7 +42,11 @@ function pypiBody(releases) {
     info: { version: versions[0] },
     releases: Object.fromEntries(versions.map((v) => {
       const [days, opts = {}] = releases[v];
-      return [v, [{ upload_time: daysAgo(days), yanked: !!opts.yanked, yanked_reason: opts.yankedReason || null }]];
+      // Provide a filename that passes the installable() check in the stub
+      // registry. The real PyPI returns filenames like
+      // "package-1.0.0-cp312-cp312-linux_x86_64.whl".
+      const filename = `${v}-cp312-cp312-linux_x86_64.whl`;
+      return [v, [{ upload_time: daysAgo(days), yanked: !!opts.yanked, yanked_reason: opts.yankedReason || null, filename }]];
     })),
   };
 }
@@ -735,5 +739,39 @@ test("e2e: --verify-integrity flags a lockfile entry with no hash", async () => 
     const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline", "--verify-integrity"]);
     assert.equal(code, 1, stdout);
     assert.match(stdout, /NO_HASH/);
+  } finally { await stub.close(); }
+});
+
+// ── MISSING_RELEASE: pin that has no installable files on PyPI ──
+test("e2e: a pin to a version that is not on PyPI is blocked as WITHDRAWN", async () => {
+  const stub = await startRegistry({
+    "acme-lib": pypiBody({ "1.0.0": [30] }),   // only 1.0.0 exists
+  });
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==9.9.9\n" });
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline"]);
+    assert.equal(code, 1, stdout);
+    assert.match(stdout, /WITHDRAWN/);
+    assert.match(stdout, /9\.9\.9/);
+  } finally { await stub.close(); }
+});
+
+test("e2e: a pin to a version with no installable files is blocked as WITHDRAWN", async () => {
+  // Stub registry returns a release but with no files array (simulates a
+  // package that exists but has no wheels/sdists). depcheck treats this as
+  // a missing/withdrawn release.
+  const stub = await startRegistry({
+    "acme-lib": {
+      info: { version: "1.0.0" },
+      releases: {
+        "1.0.0": [],   // no files → not installable
+      },
+    },
+  });
+  try {
+    const dir = await makeDir({ "requirements.txt": "acme-lib==1.0.0\n" });
+    const { code, stdout } = await runCLI(dir, stub.url, ["--no-baseline"]);
+    assert.equal(code, 1, stdout);
+    assert.match(stdout, /WITHDRAWN/);
   } finally { await stub.close(); }
 });
